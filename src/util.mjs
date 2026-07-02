@@ -123,6 +123,10 @@ export const CONFIG_DEFAULTS = {
   gate_enabled: true, // PreToolUse policy gate master switch
   ask_patterns: [], // extra [{pattern, class, note}] — tested against BOTH tool_name and Bash command
   allow_overrides: [], // [pattern] force-allow, matched before any ask class
+  proposals_enabled: true, // master switch for the proposal scan + SessionStart surfacing (DESIGN.md §3.5)
+  proposal_max_surfaced: 3, // proposals per SessionStart injection
+  stale_converged_days: 7, // converged goals older than this become re-assess proposals
+  keyoku_call_timeout_ms: 15000, // per keyoku-child JSON-RPC call (ADR-10)
 };
 
 export function toRegExp(pattern) {
@@ -141,14 +145,15 @@ export function validateConfig(raw) {
   if (typeof raw !== 'object' || Array.isArray(raw)) {
     return { cfg, warnings: ['config.json is not a JSON object — using defaults'] };
   }
-  for (const key of ['max_continuations', 'budget_floor_pct', 'spawn_floor_pct', 'thin_budget_pct', 'stale_assess_min']) {
+  for (const key of ['max_continuations', 'budget_floor_pct', 'spawn_floor_pct', 'thin_budget_pct', 'stale_assess_min', 'proposal_max_surfaced', 'stale_converged_days', 'keyoku_call_timeout_ms']) {
     if (raw[key] === undefined) continue;
     if (typeof raw[key] === 'number' && Number.isFinite(raw[key]) && raw[key] >= 0) cfg[key] = raw[key];
     else warnings.push(`config: ${key} must be a non-negative number — using default ${CONFIG_DEFAULTS[key]}`);
   }
-  if (raw.gate_enabled !== undefined) {
-    if (typeof raw.gate_enabled === 'boolean') cfg.gate_enabled = raw.gate_enabled;
-    else warnings.push('config: gate_enabled must be a boolean — using default true');
+  for (const key of ['gate_enabled', 'proposals_enabled']) {
+    if (raw[key] === undefined) continue;
+    if (typeof raw[key] === 'boolean') cfg[key] = raw[key];
+    else warnings.push(`config: ${key} must be a boolean — using default ${CONFIG_DEFAULTS[key]}`);
   }
   if (raw.ask_patterns !== undefined) {
     if (Array.isArray(raw.ask_patterns)) {

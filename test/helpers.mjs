@@ -2,9 +2,11 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
 
 export const bin = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'belay.mjs');
+export const fakeKeyokuBin = resolve(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'fake-keyoku.mjs');
 export const nowSec = () => Math.round(Date.now() / 1000);
 export const iso = (sec) => new Date(sec * 1000).toISOString();
 
@@ -105,3 +107,126 @@ export function writeProfiles(h, profiles) {
 export const stopPayload = (over = {}) => ({ session_id: 's1', cwd: '/tmp/proj', stop_hook_active: false, ...over });
 
 export const toolPayload = (over = {}) => ({ session_id: 's1', cwd: '/tmp/proj', tool_name: 'Bash', tool_input: { command: 'ls' }, ...over });
+
+// ── SOTA round-0 fixtures (docs/DESIGN.md §6.0.2 — FROZEN for the build round) ─────────
+
+/** ~/.belay/loops.json — accepts a bare {goalId: entry} map or the full {loops:{…}} shape.
+ *  Entry defaults follow §3.1: {armed:true, paused:false, armed_at, armed_by:'user'}. */
+export function writeLoops(h, loops) {
+  mkdirSync(h.belay, { recursive: true });
+  const map = loops && typeof loops === 'object' && loops.loops ? loops.loops : loops ?? {};
+  const out = {};
+  for (const [goalId, over] of Object.entries(map)) {
+    out[goalId] = { armed: true, paused: false, armed_at: nowSec() - 60, armed_by: 'user', paused_at: null, ...over };
+  }
+  writeFileSync(join(h.belay, 'loops.json'), typeof loops === 'string' ? loops : JSON.stringify({ loops: out }, null, 2));
+}
+
+/** ~/.belay/proposals.json — accepts an array of (partial) proposal rows or {proposals:[…]}. */
+export function writeProposals(h, proposals) {
+  mkdirSync(h.belay, { recursive: true });
+  const arr = Array.isArray(proposals) ? proposals : proposals?.proposals ?? [];
+  const out = arr.map((p, i) => ({
+    id: `prop-${i + 1}`,
+    kind: 'unfocused-autonomous',
+    summary: 'proposal',
+    evidence: {},
+    suggested_create: {},
+    created_at: nowSec() - 60,
+    status: 'open',
+    surfaced_count: 0,
+    ...p,
+  }));
+  writeFileSync(join(h.belay, 'proposals.json'), typeof proposals === 'string' ? proposals : JSON.stringify({ proposals: out }, null, 2));
+}
+
+/** ~/.tokenroom/resume.json in tokenroom's real shape (src/resume.mjs):
+ *  {summary(≤500), est_tokens, created_at, resume_at}. resumeAtAgoSec > 0 → resume time
+ *  already passed (S1 ready); negative → still in the future. */
+export function writeResume(h, { summary = 'finish the deferred migration', resumeAtAgoSec = 60, estTokens = 12000, createdAgoSec = 3600 } = {}) {
+  mkdirSync(h.tokenroom, { recursive: true });
+  writeFileSync(
+    join(h.tokenroom, 'resume.json'),
+    JSON.stringify({ summary, est_tokens: estTokens, created_at: nowSec() - createdAgoSec, resume_at: nowSec() - resumeAtAgoSec })
+  );
+}
+
+/** ~/.keyoku/ripe.json — keyoku's background-nudge cache: {at, suggestions[]}. */
+export function writeRipe(h, suggestions = [], { atAgoSec = 60 } = {}) {
+  mkdirSync(h.keyoku, { recursive: true });
+  writeFileSync(join(h.keyoku, 'ripe.json'), JSON.stringify({ at: iso(nowSec() - atAgoSec), suggestions }));
+}
+
+/**
+ * Seed <h.config>/.claude.json registering a keyoku MCP server — by default the
+ * fake-keyoku fixture pointed at this world's KEYOKU_HOME. stack.mjs claudeJsonPath()
+ * finds it via the CLAUDE_CONFIG_DIR that env(h) already sets. Returns the path.
+ * keyokuCmd: full {command, args, env} override for drift/negative tests.
+ */
+export function writeClaudeJson(h, { keyokuCmd } = {}) {
+  mkdirSync(h.config, { recursive: true });
+  const spec = keyokuCmd ?? { type: 'stdio', command: process.execPath, args: [fakeKeyokuBin], env: { KEYOKU_HOME: h.keyoku } };
+  const p = join(h.config, '.claude.json');
+  writeFileSync(p, JSON.stringify({ mcpServers: { keyoku: spec } }, null, 2));
+  return p;
+}
+
+/**
+ * Newline-JSON-RPC driver over a spawned stdio server (the shape both `belay mcp` and
+ * fake-keyoku speak). Returns:
+ *   call(method, params?)  → Promise<full JSON-RPC response message>
+ *   notify(method, params?)
+ *   send(rawLine)          → write an arbitrary line (garbage-input tests)
+ *   close()                → Promise<{ code, stdout, stderr }> (ends stdin, awaits exit)
+ */
+export function jsonRpcSession(exec, args, envOver = {}) {
+  const child = spawn(exec, args, { env: { ...process.env, ...envOver }, stdio: ['pipe', 'pipe', 'pipe'] });
+  let nextId = 1;
+  let stderr = '';
+  const extra = [];
+  const pending = new Map();
+  child.stderr.on('data', (d) => (stderr += d));
+  createInterface({ input: child.stdout }).on('line', (line) => {
+    let m;
+    try {
+      m = JSON.parse(line);
+    } catch {
+      extra.push(line);
+      return;
+    }
+    if (m && m.id !== undefined && pending.has(m.id)) {
+      pending.get(m.id)(m);
+      pending.delete(m.id);
+    } else extra.push(line);
+  });
+  const exited = new Promise((res) => child.on('close', (code) => res(code)));
+  return {
+    child,
+    call: (method, params = {}, timeoutMs = 5000) =>
+      new Promise((resolvep, rejectp) => {
+        const id = nextId++;
+        const t = setTimeout(() => {
+          pending.delete(id);
+          rejectp(new Error(`jsonRpcSession: no response to ${method} (id ${id}) in ${timeoutMs}ms; stderr: ${stderr}`));
+        }, timeoutMs);
+        pending.set(id, (m) => {
+          clearTimeout(t);
+          resolvep(m);
+        });
+        child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+      }),
+    notify: (method, params = {}) => child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n'),
+    send: (rawLine) => child.stdin.write(rawLine + '\n'),
+    close: async () => {
+      child.stdin.end();
+      const code = await exited;
+      return { code, stdout: extra.join('\n'), stderr };
+    },
+  };
+}
+
+/** Spawn `belay mcp` against this world's homes and drive it over newline JSON-RPC. */
+export const mcpSession = (h) => jsonRpcSession(process.execPath, [bin, 'mcp'], env(h));
+
+/** Spawn the fake-keyoku fixture against this world's KEYOKU_HOME. */
+export const fakeKeyokuSession = (h) => jsonRpcSession(process.execPath, [fakeKeyokuBin], { KEYOKU_HOME: h.keyoku });

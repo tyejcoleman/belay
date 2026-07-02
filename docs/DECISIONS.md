@@ -187,6 +187,92 @@ gear the rope clips into, and this is a Claude Code **harness** integration. The
 the short `belay`. Removed `private: true` so the package is publishable (publishing itself
 is a user-side step — see the README).
 
+## ADR-9 — belay MCP: composition, not proxy *(PROPOSED — accepted at build convergence)*
+
+**Decision:** `belay mcp` is a hand-rolled newline-delimited stdio JSON-RPC 2.0 server
+(tokenroom's proven pattern: readline over stdin, `JSON.stringify + '\n'` out; zero deps).
+The surface is exactly **7 tools** (`belay_status`, `belay_loop_create`, `belay_loop_list`,
+`belay_loop_pause`, `belay_loop_resume`, `belay_loop_disarm`, `belay_propose` — schemas
+frozen in `src/mcp.mjs TOOLS` and docs/DESIGN.md §2.2). Belay's tools exist only where the
+answer requires **composing** goal truth (keyoku files) × budget truth (tokenroom files) ×
+enforcement state (belay files), or where a write must be orchestrated as one confirmed
+act. Every response field maps to an exact file source; budget-unknown stays unknown.
+Single-source questions stay DIRECT calls to keyoku's and tokenroom's own servers
+(`goal_assess`, `goal_record`, `checkpoint`, `fit_check`, …) — belay never proxies them.
+
+**Why:** Proxying single-source tools would add a spawn's latency and schema drift for
+zero composition value, and would put belay in the business of relaying keyoku's
+model-facing guidance. Composition is the one thing no other tool can answer ("what would
+the Stop hook do right now, and can I afford it?"), so that is the whole surface. The
+hand-rolled transport keeps the zero-dependency invariant and is the same pattern already
+proven in production by tokenroom. `belay status` (CLI) and `belay_status` (MCP) render
+from the same `compose.mjs` functions so the two can never drift. Budget attribution
+mirrors tokenroom's ADR-24: MCP calls carry no session id, so with ≥2 accounts active in
+the last 10 minutes and no `session_id` argument, quota figures are withheld with an
+explicit `attribution` note — wrong-account numbers are worse than none.
+
+## ADR-10 — keyoku writes only through keyoku's registered process *(PROPOSED — accepted at build convergence)*
+
+**Decision:** When belay must WRITE keyoku state (goal_create / goal_update / goal_focus /
+goal_unfocus for loop create/disarm), it spawns the `~/.claude.json`-registered keyoku
+server command verbatim (`{command, args, env}` from the same `allMcpServers()` parse the
+doctor uses) as a short-lived stdio JSON-RPC child — `initialize` →
+`notifications/initialized` → `tools/call` per step → close stdin — with a hard per-call
+timeout (`keyoku_call_timeout_ms`, default 15s, child killed on breach). This happens at
+**MCP-call latency only, never at hook latency**; hooks keep reading files (ADR-1
+unchanged). Belay never rewrites `goals.json`/`focus.json` and never re-validates
+criteria — keyoku's own zod errors return verbatim (single validator, no drift).
+
+**Why:** There is no CLI goal-create, and CLI `focus` can't pin a sessionId; the serve
+surface is keyoku's *primary, versioned* contract — the same one Claude Code speaks — and
+spawning the registered command guarantees version match with the live server. Keyoku's
+store is explicitly cacheless (every read goes to disk; mutations are read-modify-write
+over the freshest copy), which is the concurrency license for a short-lived second keyoku
+process. The measured spawn cost (160–264ms + SDK startup) is fine per MCP call and
+forbidden per hook (≈44ms budget). The registered spec's `env` passes through to the
+child verbatim but is never logged or echoed in errors, and child stderr is sanitized
+(ADR-7) before surfacing. The version pin >=2.7 <3 stays doctor-checked.
+
+## ADR-11 — proposals never act *(PROPOSED — accepted at build convergence)*
+
+**Decision:** The proposal pipeline is scan (pure file reads over the S1–S5 signals) →
+persist (`~/.belay/proposals.json`, content-hash ids) → surface (SessionStart
+`additionalContext`, sanitized per-line and capped ≤1.5KB total, top
+`proposal_max_surfaced` only; plus the `belay_propose` tool) → and the ONLY arming path is
+an explicit `belay_loop_create` call, which records provenance
+(`armed_by: "proposal:<id>"`). No auto-arm, no auto-focus, no hook ever writes keyoku
+state. Ids are content-hashes of the signal's key fields, so dismissal sticks until the
+underlying signal itself changes. Belay never invents machine checks: an S1
+(deferred-work) suggestion ships `needs_probes: true` for the model to concretize.
+
+**Why:** Surfacing and acting must be separated by an explicit, attributable call — the
+constraint text designates the `belay_loop_create` call as the confirmation, and the
+safety story does not rest on arming anyway: autonomy is per-goal and was set explicitly,
+the PreToolUse arrest gates the irreversible frontier regardless of how a loop was armed,
+ADR-6 bounds every loop, and the arm is provenance-logged and auditable via
+`belay_loop_list`. The surfaced text is built from file-controlled input (resume
+summaries, goal slugs, keyoku ripe text), so the full ADR-7 sanitize+cap posture applies;
+zero open proposals means zero output (the silent no-op posture of ADR-4).
+
+## ADR-12 — pause suspends the rope, never the arrest *(PROPOSED — accepted at build convergence)*
+
+**Decision:** `belay_loop_pause` suspends ONLY the Stop-hook hold (one unconditional-allow
+branch keyed on `loops.json` `paused`). While the goal remains focused + autonomous +
+active, the PreToolUse gate keeps routing irreversible/external actions to the human —
+`gate.mjs` does not consult `loops.json` at all, by construction. Dropping the arrest
+requires **disarm** (goal_unfocus via keyoku's own process), which also ends the hold.
+There is no state with hold-on/arrest-off, and no code path by which loop machinery can
+disable the gate. Resume clears the one-shot `staleBlocked` spend so the first stop after
+resume re-demands fresh ground truth (`goal_assess`).
+
+**Why:** A paused loop's session may still be doing goal-adjacent work; weakening the
+arrest on pause would make "pause" a gate-bypass primitive — exactly the self-weakening
+the fall-arrest constraint forbids. Keeping the pause flag belay-local (keyoku untouched)
+preserves the single-brain rule: what the loop *is* stays keyoku's; whether belay is
+currently feeding rope is belay's. The stop-hold condition is otherwise unchanged (any
+scope-matched focused active autonomous goal is held, armed-by-belay or not), and the new
+branch is an unconditional allow, so the ADR-6 termination argument is untouched.
+
 ## Non-ADR notes
 
 - **Compliance line (from the mission):** official surfaces only — Stop and PreToolUse
