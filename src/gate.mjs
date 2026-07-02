@@ -11,34 +11,91 @@ import { readBudget } from './budget.mjs';
 
 export const SPAWN_TOOLS = ['Task', 'Agent', 'Workflow'];
 
-const DEFAULT_COMMAND_ASKS = [
-  { re: /\bgit\s+push\b/, cls: 'git push' },
-  { re: /\bnpm\s+publish\b/, cls: 'npm publish' },
-  { re: /\bgh\s+(pr|release|repo)\s+(create|merge|edit|delete)\b/, cls: 'gh mutation' },
-];
+// git/gh/npm mutations that must route to the human. Classified by TOKENS (not a regex
+// anchored to "binary immediately followed by subcommand") so a GLOBAL OPTION can't smuggle
+// the subcommand past the check: `git -C DIR push`, `git --git-dir=x push`,
+// `gh -R owner/repo pr merge`, `env FOO=bar git push` all match now.
+const GIT_GLOBAL_ARG = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--super-prefix']);
+const GH_GLOBAL_ARG = new Set(['-R', '--repo']);
+const GH_MUTATION_SUB = new Set(['pr', 'release', 'repo']);
+const GH_MUTATION_ACTION = new Set(['create', 'merge', 'edit', 'delete']);
+
+/** First non-option token at/after startIdx, skipping global options — and the SEPARATE
+ *  argument of any option listed in takesArg. Returns { sub, idx } (idx = -1 if none). */
+function nextSubcommand(tok, startIdx, takesArg) {
+  let i = startIdx;
+  while (i < tok.length) {
+    const t = tok[i];
+    if (t.startsWith('-')) {
+      const name = t.includes('=') ? t.slice(0, t.indexOf('=')) : t;
+      if (!t.includes('=') && takesArg.has(name)) i++; // consume its separate argument
+      i++;
+      continue;
+    }
+    return { sub: t, idx: i };
+  }
+  return { sub: null, idx: -1 };
+}
+
+/** git push / npm publish / gh (pr|release|repo) (create|merge|edit|delete), or null. */
+function classifyVcs(command) {
+  for (const seg of command.split(/&&|\|\||[;|\n]/)) {
+    const tok = seg.trim().split(/\s+/).filter(Boolean);
+    let i = 0;
+    while (i < tok.length && (tok[i] === 'sudo' || tok[i] === 'command' || tok[i] === 'env' || tok[i] === 'nice' || /^[\w.]+=/.test(tok[i]))) i++;
+    const bin = (tok[i] || '').split('/').pop();
+    if (bin === 'git') {
+      if (nextSubcommand(tok, i + 1, GIT_GLOBAL_ARG).sub === 'push') return 'git push';
+    } else if (bin === 'npm') {
+      if (nextSubcommand(tok, i + 1, new Set()).sub === 'publish') return 'npm publish';
+    } else if (bin === 'gh') {
+      const first = nextSubcommand(tok, i + 1, GH_GLOBAL_ARG);
+      if (GH_MUTATION_SUB.has(first.sub)) {
+        const action = nextSubcommand(tok, first.idx + 1, GH_GLOBAL_ARG);
+        if (GH_MUTATION_ACTION.has(action.sub)) return 'gh mutation';
+      }
+    }
+  }
+  return null;
+}
 
 // External sends via MCP tools (Slack messages, Gmail drafts/sends, generic publish).
 // Scoped to mcp__ tools on purpose: built-in harness tools (e.g. subagent SendMessage)
 // are in-session coordination, not external side effects.
 const TOOLNAME_ASK = /^mcp__.*(send|publish|add_message|post_message|create_draft)/i;
 
-/** rm -rf whose resolved target escapes the session cwd (or is clearly absolute/home). */
+// Locate every rm invocation regardless of shell wrapper or quoting: after a command
+// boundary / whitespace / quote / '(' / '=' , an optional path prefix (/bin/rm), then rm.
+// The captured tail runs to the next boundary (newline ; | & or backtick).
+const RM_SCAN = /(?:^|[\s;|&`'"(=])(?:[\w./-]*\/)?rm\b([^\n;|&`]*)/g;
+
+/**
+ * rm -rf whose resolved target escapes the session cwd. Conservative + WRAPPER-AWARE
+ * (ADR-3: ask, not deny — over-asking is safe): a recursive+force rm is caught even behind
+ * `sh -c '…'`, `env VAR=x rm`, backticks, `$(…)`, `xargs rm`, an absolute `/bin/rm`, or
+ * inside quotes — cases the plain token walk missed. Targets we cannot prove are inside cwd
+ * — unexpanded `$VAR` / `$(…)` / backticks, or absent entirely (stdin/xargs/redirect) — are
+ * treated as OUTSIDE and routed to the human.
+ */
 export function rmrfOutsideCwd(command, cwd) {
-  for (const seg of command.split(/&&|\|\||[;|\n]/)) {
-    const tok = seg.trim().split(/\s+/).filter(Boolean);
-    let i = 0;
-    while (tok[i] === 'sudo' || tok[i] === 'env' || tok[i] === 'command') i++;
-    if (!(tok[i] === 'rm' || (tok[i] ?? '').endsWith('/rm'))) continue;
-    const args = tok.slice(i + 1);
-    const flags = args.filter((t) => t.startsWith('-'));
+  if (typeof command !== 'string' || !command) return false;
+  const base = typeof cwd === 'string' && cwd ? cwd.replace(/\/+$/, '') : null;
+  RM_SCAN.lastIndex = 0;
+  let m;
+  while ((m = RM_SCAN.exec(command))) {
+    const toks = m[1].replace(/['"]/g, ' ').split(/\s+/).filter(Boolean);
+    const flags = toks.filter((t) => t.startsWith('-'));
     const short = flags.filter((f) => /^-[a-zA-Z]+$/.test(f)).join('');
     const recursive = /[rR]/.test(short) || flags.includes('--recursive');
     const force = short.includes('f') || flags.includes('--force');
     if (!(recursive && force)) continue;
-    const base = typeof cwd === 'string' && cwd ? cwd.replace(/\/+$/, '') : null;
-    for (const raw of args.filter((t) => !t.startsWith('-'))) {
-      const t = raw.replace(/^['"]|['"]$/g, '');
-      if (!t) continue;
+    // xargs feeds rm's targets from stdin — the args we can see are not the real targets.
+    const preRun = command.slice(0, m.index).split(/[\n;|&`]/).pop() || '';
+    if (/\bxargs\b/.test(preRun)) return true;
+    const paths = toks.filter((t) => !t.startsWith('-'));
+    if (paths.length === 0) return true; // no explicit target (stdin/xargs/redirect) → can't prove inside
+    for (const t of paths) {
+      if (/[$`]/.test(t)) return true; // unexpanded var/subshell target → treat as outside
       if (t === '/' || t.startsWith('~')) return true;
       if (!base) {
         // unknown cwd: judge only what is provably outside a project dir
@@ -68,7 +125,8 @@ export function externalNetworkWrite(command) {
  *  against BOTH the tool name and the Bash command string. */
 export function classify(name, command, cwd, cfg) {
   if (command) {
-    for (const d of DEFAULT_COMMAND_ASKS) if (d.re.test(command)) return { class: d.cls, note: null };
+    const vcs = classifyVcs(command);
+    if (vcs) return { class: vcs, note: null };
     if (rmrfOutsideCwd(command, cwd)) return { class: 'rm -rf outside cwd', note: null };
     if (externalNetworkWrite(command)) return { class: 'network write', note: null };
   }

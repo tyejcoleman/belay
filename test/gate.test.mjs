@@ -45,6 +45,30 @@ test('rm -rf: outside cwd → ask; inside cwd → silent', () => {
   assert.equal(gate(h, toolPayload({ tool_input: { command: 'rm -r docs' } })).stdout, ''); // recursive but not force
 });
 
+test('git/gh global options can no longer smuggle the subcommand past the gate (finding 5)', () => {
+  const h = armed();
+  // global options between the binary and the subcommand — the old regex missed these
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'git -C /repo push origin main' } }))), /'git push'/);
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'git --git-dir=/x/.git push' } }))), /'git push'/);
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'git -c user.name=x push' } }))), /'git push'/);
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'gh -R owner/repo pr merge 42' } }))), /'gh mutation'/);
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'env FOO=bar git push' } }))), /'git push'/);
+  // non-mutating subcommands with global options stay silent (no over-asking)
+  assert.equal(gate(h, toolPayload({ tool_input: { command: 'git -C /repo status' } })).stdout, '');
+  assert.equal(gate(h, toolPayload({ tool_input: { command: 'gh -R owner/repo pr view 42' } })).stdout, '');
+});
+
+test('rm -rf hidden behind a shell wrapper is still caught (finding 4)', () => {
+  const h = armed(); // cwd defaults to /tmp/proj
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: "sh -c 'rm -rf /etc/nginx'" } }))), /'rm -rf outside cwd'/);
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'env FOO=bar rm -rf /etc' } }))), /'rm -rf outside cwd'/);
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'rm -rf $(cat targets)' } }))), /'rm -rf outside cwd'/);
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'cat list | xargs rm -rf' } }))), /'rm -rf outside cwd'/);
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: '/bin/rm -rf ~/data' } }))), /'rm -rf outside cwd'/);
+  // an inside-cwd delete through a wrapper still passes silently (no over-asking)
+  assert.equal(gate(h, toolPayload({ tool_input: { command: "sh -c 'rm -rf ./build'" } })).stdout, '');
+});
+
 test('curl/wget writes: non-localhost POST/PUT → ask; localhost or GET → silent', () => {
   const h = armed();
   assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'curl -X POST https://api.example.com/v1/launch -d @payload.json' } }))), /'network write'/);
