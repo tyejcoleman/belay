@@ -5,7 +5,8 @@ import { resolveTokenroom, stackHealth, renderStackHealth, claudeJsonPath } from
 // `belay bundle` — one command that wires the whole autonomous stack:
 //   1) tokenroom (resource awareness) — detect its bin, invoke its own installer
 //   2) keyoku    (goal convergence MCP) — verify it is registered (READ-ONLY; never touch it)
-//   3) belay     (this Stop + PreToolUse loop) — install additively (preserve every other hook)
+//   3) belay     (Stop + PreToolUse + SessionStart hooks, plus `claude mcp add belay` MCP
+//                 registration) — install additively (preserve every other hook)
 // Idempotent and re-runnable. Everything belay writes goes through the existing additive
 // install path, so tokenroom's (and anyone else's) hooks are never clobbered.
 
@@ -59,10 +60,11 @@ export function bundle(argv = []) {
   }
   console.log('   - (verification only — belay never modifies keyoku registration or restarts it)');
 
-  // ── leg 3: belay (Stop + PreToolUse) — additive install ──
+  // ── leg 3: belay (Stop + PreToolUse + SessionStart hooks + MCP registration) ──
   // install() prints its own section, is additive + idempotent (preserves tokenroom's and
-  // every other hook), and refuses the npx cache on its own.
-  console.log('\n3) belay  (Stop + PreToolUse autonomy loop)');
+  // every other hook), registers the belay MCP server via the official `claude mcp add`
+  // (skipped in sandboxed config dirs / with --no-mcp), and refuses the npx cache on its own.
+  console.log('\n3) belay  (Stop + PreToolUse + SessionStart autonomy loop + MCP server)');
   install(argv);
 
   // ── summary + next steps ──
@@ -76,6 +78,8 @@ export function bundle(argv = []) {
   console.log('  2. Focus it (keyoku goal_focus) — this scopes the loop to this session / cwd.');
   console.log('  3. Set the goal autonomy to `autonomous`.');
   console.log('  4. Run `belay doctor` to confirm all three legs are green.');
+  console.log('  (or do 1–3 as one confirmed act: the `belay_loop_create` MCP tool creates,');
+  console.log('   focuses, and arms the loop through keyoku\'s own process.)');
   console.log('  Then just work: belay holds the session on the goal until it converges,');
   console.log('  and routes irreversible/external actions (push, publish, sends) to you.');
   console.log(

@@ -1,9 +1,9 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { readJSON, readConfig, tokenroomDir, belayDir } from './util.mjs';
+import { readJSON, readConfig, tokenroomDir, belayDir, sanitizeSlug } from './util.mjs';
 import { keyokuHome, tailObservation, scopeMatch } from './keyoku.mjs';
 import { configDir, MARK } from './install.mjs';
-import { findKeyokuVersion, parseVersion, KEYOKU_RANGE, stackHealth, renderStackHealth } from './stack.mjs';
+import { findKeyokuVersion, parseVersion, KEYOKU_RANGE, stackHealth, renderStackHealth, claudeJsonPath } from './stack.mjs';
 
 // `belay doctor` — one health view of the whole autonomous stack, then the ADR-1
 // counterweight: we code against keyoku's FILES, not its process, so we ship a layout
@@ -89,14 +89,62 @@ export function doctor(argv = []) {
     if (existsSync(join(tr, 'profiles.json'))) say('ok', 'profiles.json present — alt-profile advice enabled');
   }
 
-  // ── hook registration ──
+  // ── hook registration (Stop = rope, PreToolUse = arrest, SessionStart = briefing) ──
   const dir = configDir([]);
   console.log(lines.splice(0).join('\n') + `\n\nhooks (${join(dir, 'settings.json')})`);
   const settings = readJSON(join(dir, 'settings.json'));
-  for (const event of ['Stop', 'PreToolUse']) {
+  for (const event of ['Stop', 'PreToolUse', 'SessionStart']) {
     const entries = Array.isArray(settings?.hooks?.[event]) ? settings.hooks[event] : [];
     const present = entries.some((m) => (m?.hooks ?? []).some((h) => typeof h?.command === 'string' && h.command.includes(MARK)));
     say(present ? 'ok' : 'warn', `${event} hook ${present ? 'registered' : 'NOT registered — run `belay install`'}`);
+  }
+
+  // ── MCP registration (the belay_status / belay_loop_* / belay_propose surface) ──
+  const cjPath = claudeJsonPath();
+  console.log(lines.splice(0).join('\n') + `\n\nmcp (${cjPath})`);
+  const cj = readJSON(cjPath);
+  const mcpNames = [];
+  if (cj && typeof cj === 'object') {
+    if (cj.mcpServers && typeof cj.mcpServers === 'object') mcpNames.push(...Object.keys(cj.mcpServers));
+    if (cj.projects && typeof cj.projects === 'object') {
+      for (const p of Object.values(cj.projects)) {
+        if (p && typeof p === 'object' && p.mcpServers && typeof p.mcpServers === 'object') mcpNames.push(...Object.keys(p.mcpServers));
+      }
+    }
+  }
+  if (mcpNames.some((n) => /belay/i.test(n))) say('ok', 'belay MCP server registered — belay_status / belay_loop_* / belay_propose available in sessions');
+  else say('warn', 'belay MCP server NOT registered — run `belay install` (or `claude mcp add --scope user belay <node> <abs bin/belay.mjs> mcp`)');
+
+  // ── loop + proposal state (~/.belay — belay's only writable domain, DESIGN.md §3.1) ──
+  console.log(lines.splice(0).join('\n') + `\n\nloops + proposals (${belayDir()})`);
+  const loopsRaw = existsSync(join(belayDir(), 'loops.json')) ? readJSON(join(belayDir(), 'loops.json')) : undefined;
+  if (loopsRaw === undefined) say('ok', 'no loops.json — no loops armed yet (arm one with `belay loop create` / belay_loop_create)');
+  else if (!loopsRaw || typeof loopsRaw !== 'object' || !loopsRaw.loops || typeof loopsRaw.loops !== 'object' || Array.isArray(loopsRaw.loops)) {
+    say('warn', 'loops.json malformed — hooks degrade to no-loops behavior (ADR-4); delete it or re-arm to repair');
+  } else {
+    const entries = Object.entries(loopsRaw.loops);
+    const paused = entries.filter(([, e]) => e && typeof e === 'object' && e.paused === true).length;
+    say('ok', `loops.json: ${entries.length} ${entries.length === 1 ? 'entry' : 'entries'} (${entries.length - paused} armed, ${paused} paused)`);
+    if (paused > 0) say('ok', 'paused loops release the Stop hold ONLY — the PreToolUse fall-arrest stays active while the goal is focused (ADR-12)');
+    const goalRows = readJSON(join(home, 'goals.json'));
+    if (entries.length && Array.isArray(goalRows)) {
+      const orphans = entries.filter(([gid]) => !goalRows.some((g) => g && typeof g === 'object' && g.id === gid)).map(([gid]) => sanitizeSlug(gid, 40));
+      if (orphans.length) say('warn', `${orphans.length} loop ${orphans.length === 1 ? 'entry points' : 'entries point'} at goals missing from goals.json (${orphans.slice(0, 3).join(', ')}) — pruned on the next loop write`);
+      else say('ok', 'every loop entry maps to a goals.json row');
+    }
+  }
+  const propsRaw = existsSync(join(belayDir(), 'proposals.json')) ? readJSON(join(belayDir(), 'proposals.json')) : undefined;
+  if (propsRaw === undefined) say('ok', 'no proposals.json — nothing proposed yet (the scan runs at SessionStart / `belay propose`)');
+  else if (!propsRaw || !Array.isArray(propsRaw.proposals)) say('warn', 'proposals.json malformed — treated as none; the next scan re-derives it');
+  else {
+    const KINDS = ['resume-ready', 'unfocused-autonomous', 'stale-converged', 'budget-reset', 'keyoku-ripe'];
+    const STATUSES = ['open', 'dismissed', 'armed'];
+    const bad = propsRaw.proposals.filter((p) => !(p && typeof p === 'object' && typeof p.id === 'string' && p.id && KINDS.includes(p.kind) && STATUSES.includes(p.status)));
+    if (bad.length) say('warn', `proposals.json: ${bad.length}/${propsRaw.proposals.length} rows missing id/kind/status (or carrying unknown values) — shape contract broken?`);
+    else {
+      const count = (st) => propsRaw.proposals.filter((p) => p && p.status === st).length;
+      say('ok', `proposals.json: ${propsRaw.proposals.length} proposals (${count('open')} open, ${count('dismissed')} dismissed, ${count('armed')} armed) — never auto-armed (ADR-11)`);
+    }
   }
 
   // ── config ──

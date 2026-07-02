@@ -1,13 +1,23 @@
 import { join } from 'node:path';
-import { readJSON, readConfig, fmtClock } from './util.mjs';
+import { readJSON, readConfig, fmtClock, belayDir, sanitizeText } from './util.mjs';
 import { keyokuHome, readKeyoku, goalSlug, unmetDetail } from './keyoku.mjs';
 import { readBudget } from './budget.mjs';
 import { readOwnState, sessionEntry } from './state.mjs';
 import { decideStop } from './stop.mjs';
+import { readLoops } from './loops.mjs';
 
-/** `belay status` — current focused goal + the would-block verdict + counters.
- *  Evaluates the SAME decision function the Stop hook runs, from the focus's own scope
- *  (so a session-pinned focus is judged as that session would be). Read-only. */
+/** Open-proposal count straight from proposals.json (ADR-9 posture: a count, never copies;
+ *  absent/malformed → 0). `belay propose` / belay_propose carry the full evidence. */
+function openProposalCount() {
+  const p = readJSON(join(belayDir(), 'proposals.json'));
+  return Array.isArray(p?.proposals) ? p.proposals.filter((x) => x && typeof x === 'object' && x.status === 'open').length : 0;
+}
+
+/** `belay status` — current focused goal + the would-block verdict + counters, plus the
+ *  SOTA surfaces: the goal's loop arm/pause provenance (loops.json) and how many
+ *  proposals are open (proposals.json). Evaluates the SAME decision function the Stop
+ *  hook runs, from the focus's own scope (so a session-pinned focus is judged as that
+ *  session would be). Read-only; every figure comes from a state file. */
 export function status() {
   const focus = readJSON(join(keyokuHome(), 'focus.json'));
   const payload = {
@@ -20,9 +30,22 @@ export function status() {
   const budget = readBudget(payload.session_id);
 
   console.log(`belay status (keyoku: ${k.home})`);
-  if (!k.present) return console.log('  keyoku home not found — belay idles');
-  if (k.paused) return console.log("  'paused' marker present — belay is a no-op");
-  if (!k.focus) return console.log('  no focused goal — belay idles');
+  const proposalsLine = () => {
+    const n = openProposalCount();
+    console.log(`  proposals: ${n} open${n ? ' — `belay propose` for evidence + ready-to-arm args (never auto-armed)' : ''}`);
+  };
+  if (!k.present) {
+    console.log('  keyoku home not found — belay idles');
+    return proposalsLine();
+  }
+  if (k.paused) {
+    console.log("  'paused' marker present — belay is a no-op");
+    return proposalsLine();
+  }
+  if (!k.focus) {
+    console.log('  no focused goal — belay idles');
+    return proposalsLine();
+  }
 
   const own = readOwnState();
   const entry = sessionEntry(own, payload.session_id, k.goal?.id ?? null);
@@ -35,6 +58,21 @@ export function status() {
     const unmet = unmetDetail(g, k.obs);
     console.log(`    unmet: ${unmet == null ? 'unknown (no assessment observation)' : unmet.length ? unmet.join('; ') : 'none'}`);
     console.log(`    last observation at: ${k.obs?.at ?? 'never'}${g.lastAssessedAt ? ` · lastAssessedAt: ${g.lastAssessedAt}` : ''}`);
+    // Loop arm/pause provenance (loops.json — belay's own file). Arming is provenance +
+    // counter reset, not a precondition: the Stop hold applies to any focused active
+    // autonomous goal regardless (docs/DESIGN.md §3.2).
+    const le = readLoops().loops[g.id];
+    if (le && typeof le === 'object') {
+      const by = sanitizeText(String(le.armed_by ?? 'unknown'), 48); // belay-file-controlled, sanitized anyway (ADR-7 posture)
+      const note = typeof le.note === 'string' && le.note ? ` · note: ${sanitizeText(le.note, 80)}` : '';
+      if (le.paused === true) {
+        console.log(`    loop: PAUSED (armed by ${by}) — stop hold released; the fall-arrest gate stays active while focused (ADR-12) — \`belay loop resume\` to re-arm${note}`);
+      } else {
+        console.log(`    loop: armed by ${by}${le.armed_at ? ` since ${fmtClock(le.armed_at)}` : ''}${note}`);
+      }
+    } else {
+      console.log('    loop: not armed via belay (the Stop hold applies to any focused active autonomous goal regardless)');
+    }
   } else {
     console.log(`  focus: ${k.focus.goalId} — ${k.matched ? 'goal row not found in goals.json' : 'out of scope from here'}`);
   }
@@ -50,4 +88,5 @@ export function status() {
 
   console.log(`  counters: ${entry.continuations}/${cfg.max_continuations} continuations · stale-block ${entry.staleBlocked ? 'spent' : 'available'} (session ${payload.session_id})`);
   console.log(`  verdict: would ${d.action.toUpperCase()} (${d.kind})${d.reason ? `\n    reason: ${d.reason}` : ''}${d.note ? `\n    note: ${d.note}` : ''}`);
+  proposalsLine();
 }
