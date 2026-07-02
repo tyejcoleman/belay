@@ -34,12 +34,13 @@ export function budgetLine(b, cfg) {
  */
 export function decideStop(p, k, budget, cfg, entry, nowSec = Date.now() / 1000) {
   // ADR-6: we no longer blanket-allow on Claude Code's stop_hook_active guard — that
-  // capped the loop at ONE forced continuation per turn and let the stale-block consume
-  // it. Instead, a FRESH stop (stop_hook_active !== true) starts a new continuation
-  // chain and resets this (session, goal)'s budget; MID-CHAIN stops (stop_hook_active
-  // === true) accumulate against it. Termination is then governed by conductor's own
-  // bounded guards (max_continuations, the one-shot stale/unknown block) — see ADR-6.
-  if (p.stop_hook_active !== true) entry = { ...entry, continuations: 0, staleBlocked: false };
+  // capped the loop at ONE forced continuation per turn (making max_continuations
+  // unreachable) and let the one-shot stale-block consume it. We deliberately do NOT reset
+  // counters on the flag either: termination must not depend on the harness ever setting
+  // stop_hook_active (ADR-4 — never wedge a session). Instead conductor's OWN monotonic,
+  // durable per-(session, goal) continuation budget bounds the loop deterministically for
+  // ANY sequence of stops — see the ADR-6 termination argument. Every stop is now
+  // evaluated; stop_hook_active is not consulted here.
   if (!k.present) return { action: 'allow', kind: 'keyoku-absent' };
   if (k.paused) return { action: 'allow', kind: 'paused' };
   if (!k.focus) return { action: 'allow', kind: 'no-focus' };

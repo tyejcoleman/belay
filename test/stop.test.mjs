@@ -61,8 +61,10 @@ test('continuation loop is BOUNDED: a chain of mid-chain stops blocks up to max_
   assert.equal(done.stdout, '');
   assert.match(done.stderr, /continuation budget exhausted for goal 'ship-widget' \(3\/3 this session\)/);
 
-  // a NEW fresh chain (stop_hook_active:false) resets the budget → blocks again
-  assert.equal(JSON.parse(stop(h).stdout).decision, 'block');
+  // the budget is per (session, goal) and MONOTONIC — even a fresh stop stays allowed once
+  // exhausted (termination cannot be reset by the harness withholding stop_hook_active).
+  assert.equal(stop(h).stdout, '');
+  assert.equal(stop(h, stopPayload({ stop_hook_active: false })).stdout, '');
 });
 
 test('observe / suggest / approve goals never self-continue', () => {
@@ -148,7 +150,7 @@ test('continuation counter exhaustion → allow with stderr note; counter resets
   writeTokenroom(h);
   mkdirSync(h.conductor, { recursive: true });
   writeFileSync(join(h.conductor, 'state.json'), JSON.stringify({ sessions: { s1: { goalId: 'goal_test1', continuations: 25, staleBlocked: false, updated_at: nowSec() } } }));
-  // MID-CHAIN stop (stop_hook_active:true) so the pre-seeded counter is not reset (ADR-6)
+  // stop_hook_active:true is ignored by conductor now (ADR-6) — the counter is monotonic
   const r = stop(h, stopPayload({ stop_hook_active: true }));
   assert.equal(r.stdout, '');
   assert.match(r.stderr, /continuation budget exhausted for goal 'ship-widget' \(25\/25 this session\) — allowing stop/);
@@ -172,7 +174,7 @@ test('stale assessment → exactly one "run goal_assess" block, then allow', () 
   assert.equal(out.decision, 'block');
   assert.match(out.reason, /state is stale \(last assessed 120m ago\) — run goal_assess first to get ground truth/);
 
-  const second = stop(h, stopPayload({ stop_hook_active: true })); // mid-chain: staleBlocked persists (ADR-6)
+  const second = stop(h, stopPayload({ stop_hook_active: true })); // flag ignored (ADR-6); staleBlocked is durable
   assert.equal(second.stdout, '', 'stale-block is spent — must allow');
   assert.match(second.stderr, /still stale after the one stale-block/);
 
@@ -386,8 +388,8 @@ test('config overrides: max_continuations and stale_assess_min honored; bad conf
   writeTokenroom(h);
   mkdirSync(h.conductor, { recursive: true });
   writeFileSync(join(h.conductor, 'config.json'), JSON.stringify({ max_continuations: 1, stale_assess_min: 'sixty' }));
-  assert.equal(JSON.parse(stop(h).stdout).decision, 'block'); // fresh chain: reset then 0 → 1
-  const r = stop(h, stopPayload({ stop_hook_active: true })); // mid-chain: 1 >= 1 → exhausted
+  assert.equal(JSON.parse(stop(h).stdout).decision, 'block'); // 0 → 1
+  const r = stop(h, stopPayload({ stop_hook_active: true })); // 1 >= 1 → exhausted (flag ignored, ADR-6)
   assert.equal(r.stdout, '');
   assert.match(r.stderr, /\(1\/1 this session\)/);
 });
