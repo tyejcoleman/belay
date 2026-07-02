@@ -2,11 +2,13 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync } from
 import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 
 // Installer discipline mirrors tokenroom's: a MARK string identifies the entries we own,
 // install is ADDITIVE (every pre-existing hook — tokenroom's included — is preserved),
 // re-install replaces-not-duplicates, settings.json is backed up first, and npx-cache
-// paths are refused because they evaporate.
+// paths are refused because they evaporate. The MCP registration step (DESIGN §2.1) goes
+// through the official `claude mcp add` CLI only — belay never edits ~/.claude.json itself.
 
 const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const binPath = join(pkgRoot, 'bin', 'belay.mjs');
@@ -39,7 +41,46 @@ const owned = (command) => typeof command === 'string' && command.includes(MARK)
 const HOOK_EVENTS = [
   ['Stop', 'hook stop', 'goal loop: holds the session while the focused autonomous Keyoku goal is unconverged'],
   ['PreToolUse', 'hook pre-tool-use', 'policy gate: autonomy x budget x action-class'],
+  ['SessionStart', 'hook session-start', 'morning briefing: surfaces open loop proposals as additionalContext (advisory, never armed here)'],
 ];
+
+// ── MCP registration (DESIGN §2.1, ADR-9) — via the official `claude` CLI only ─────────
+// Skipped in a sandboxed config dir (--config-dir / $CLAUDE_CONFIG_DIR): `claude mcp add
+// --scope user` writes the REAL ~/.claude.json, which a sandboxed run must never touch.
+
+const manualMcpAdd = () => `claude mcp add --scope user belay "${process.execPath}" "${binPath}" mcp`;
+const sandboxed = (argv) => configDir(argv) !== join(homedir(), '.claude');
+const belayMcpRegistered = () => {
+  const cj = readSettings(join(homedir(), '.claude.json'));
+  return !!(cj.mcpServers && typeof cj.mcpServers === 'object' && cj.mcpServers.belay);
+};
+
+function registerMcp(argv, dry) {
+  if (argv.includes('--no-mcp')) return 'mcp: skipped (--no-mcp)';
+  if (sandboxed(argv)) return `mcp: skipped (sandboxed config dir) — register manually: ${manualMcpAdd()}`;
+  if (belayMcpRegistered()) return 'mcp: already registered (~/.claude.json mcpServers.belay)';
+  if (dry) return `mcp: would run: ${manualMcpAdd()}`;
+  try {
+    const r = spawnSync('claude', ['mcp', 'add', '--scope', 'user', 'belay', process.execPath, binPath, 'mcp'], { encoding: 'utf8' });
+    if (r.error || r.status !== 0) return `mcp: \`claude\` CLI unavailable or failed — register manually: ${manualMcpAdd()}`;
+    return 'mcp: registered (claude mcp add --scope user belay … mcp)';
+  } catch {
+    return `mcp: \`claude\` CLI unavailable — register manually: ${manualMcpAdd()}`;
+  }
+}
+
+function unregisterMcp(argv) {
+  if (argv.includes('--no-mcp')) return 'mcp: skipped (--no-mcp)';
+  if (sandboxed(argv)) return 'mcp: skipped (sandboxed config dir) — remove manually: claude mcp remove --scope user belay';
+  if (!belayMcpRegistered()) return 'mcp: not registered — nothing to remove';
+  try {
+    const r = spawnSync('claude', ['mcp', 'remove', '--scope', 'user', 'belay'], { encoding: 'utf8' });
+    if (r.error || r.status !== 0) return 'mcp: `claude` CLI unavailable or failed — remove manually: claude mcp remove --scope user belay';
+    return 'mcp: removed (claude mcp remove --scope user belay)';
+  } catch {
+    return 'mcp: `claude` CLI unavailable — remove manually: claude mcp remove --scope user belay';
+  }
+}
 
 export function install(argv = []) {
   if (isEphemeralInstall(pkgRoot)) {
@@ -79,6 +120,8 @@ export function install(argv = []) {
 
   if (!dry) writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
 
+  changes.push(registerMcp(argv, dry));
+
   console.log(`${dry ? '[dry-run] ' : ''}belay install → ${dir}`);
   for (const c of changes) console.log('  - ' + c);
   if (!dry)
@@ -106,6 +149,8 @@ export function uninstall(argv = []) {
     }
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
   }
+
+  changes.push(unregisterMcp(argv));
 
   console.log(`belay uninstall ← ${dir}`);
   for (const c of changes.length ? changes : ['nothing to remove']) console.log('  - ' + c);

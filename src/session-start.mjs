@@ -1,31 +1,75 @@
-// The SessionStart hook — the morning briefing (docs/DESIGN.md §4.2). Official surface:
-// hookSpecificOutput.additionalContext (same channel tokenroom uses). Owner: agent C
-// (round 1). Wired by `belay install` as `belay hook session-start` (additive, MARK-owned).
-//
-// ROUND-0 CONTRACT (FROZEN):
-// - Read the stdin payload, run propose.scan() (persists as it scans), emit the top
-//   cfg.proposal_max_surfaced (default 3) OPEN proposals as additionalContext:
-//     "[belay] N loop proposals open: (1) <kind>: <summary> — arm with
-//      belay_loop_create({…}) or dismiss via belay_propose. Proposals are advisory;
-//      arming is your explicit call."
-// - Each line sanitizeText'd, whole block capReason'd ≤1.5KB (ADR-7: resume summaries,
-//   goal slugs, ripe text are all file-controlled input).
-// - Zero open proposals → ZERO output (silent no-op posture). ANY error → silent exit 0
-//   (never-crash rule; bin's hook try/catch is the outer net, keep an inner one too like
-//   hookStop). Fires on every session start incl. compaction restarts — must stay <50ms.
-// - Proposals are surfaced, never armed here: no keyoku write, no loops.json write, no
-//   spawn of any kind from a hook (ADR-1/ADR-11).
+import { join } from 'node:path';
+import { belayDir, readJSON, readConfig, readStdin, ensureDir, atomicWriteJSON, sanitizeText, capReason } from './util.mjs';
+import { scan } from './propose.mjs';
 
-const notImplemented = (fn) => Object.assign(new Error(`belay: ${fn} not implemented (round-0 stub — see docs/DESIGN.md)`), { code: 'ERR_NOT_IMPLEMENTED' });
+// The SessionStart hook — the morning briefing (docs/DESIGN.md §4.2). Official surface:
+// hookSpecificOutput.additionalContext (same channel tokenroom uses). Wired by
+// `belay install` as `belay hook session-start` (additive, MARK-owned).
+//
+// Contract (frozen round 0):
+// - Read the stdin payload, run propose.scan() (persists as it scans), emit the top
+//   cfg.proposal_max_surfaced (default 3) OPEN proposals as additionalContext.
+// - Each line sanitizeText'd, whole block capReason'd ≤1.5KB (ADR-7: resume summaries,
+//   goal slugs, ripe text are all file-controlled input — sanitized again HERE at the
+//   boundary, belt-and-suspenders over propose.mjs's own sanitization).
+// - Zero open proposals → ZERO output (silent no-op posture). ANY error → silent exit 0
+//   (never-crash rule; bin's hook try/catch is the outer net, inner one kept like hookStop).
+//   Fires on every session start incl. compaction restarts — pure file reads, <50ms.
+// - Proposals are surfaced, never armed here: no keyoku write, no loops.json write, no
+//   spawn of any kind from a hook (ADR-1/ADR-11). The only write is the belay-local
+//   surfaced_count bookkeeping in proposals.json.
+
+const MAX_CONTEXT_BYTES = 1536; // 1.5KB — DESIGN §4.2 / ADR-11 flood cap
+const MAX_LINE = 300; // per-proposal line cap (summary itself is already ≤200)
 
 /**
  * Entry point for `belay hook session-start`.
  * Emits { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext } } on
- * stdout when there are open proposals; otherwise emits nothing. Never throws to the
- * caller in round 1 (inner try/catch → silent); the round-0 stub throws NotImplemented,
- * which bin's hook choke-point catch turns into today's silent exit 0.
+ * stdout when there are open proposals; otherwise emits nothing.
  * @returns {Promise<void>}
  */
 export async function hookSessionStart() {
-  throw notImplemented('hookSessionStart');
+  // Consume the payload (nothing in it changes the scan — scan scopes by files), but
+  // BOUNDED: a caller that never closes stdin must not wedge the hook (ADR-4; the
+  // harness's own hook timeout is the outer net, this is the inner one). The payload
+  // arrives-and-closes within ms in the real harness, so the race is normally a no-op.
+  try {
+    await Promise.race([readStdin(), new Promise((resolve) => setTimeout(resolve, 250).unref?.())]);
+    process.stdin.unref?.(); // a still-pending read must not hold the process open
+  } catch {
+    // stdin quirks are not our problem — proceed without the payload
+  }
+  try {
+    const { cfg } = readConfig();
+    if (!cfg.proposals_enabled) return;
+    const open = scan().proposals.filter((p) => p && typeof p === 'object' && p.status === 'open');
+    const top = open.slice(0, cfg.proposal_max_surfaced);
+    if (top.length === 0) return; // silence is the posture (ADR-4)
+
+    const items = top.map((p, i) => sanitizeText(`(${i + 1}) ${p.kind} [${p.id}]: ${p.summary}`, MAX_LINE));
+    const context = capReason(
+      `[belay] ${open.length} loop proposal${open.length === 1 ? '' : 's'} open: ${items.join(' ')} — arm one with belay_loop_create({ proposal_id: <id>, … }) or dismiss via belay_propose({ dismiss: <id> }). Proposals are advisory; arming is your explicit call.`,
+      MAX_CONTEXT_BYTES
+    );
+
+    // surfaced_count bookkeeping (belay-local, best-effort — never blocks the surfacing)
+    try {
+      const path = join(belayDir(), 'proposals.json');
+      const s = readJSON(path);
+      if (s && typeof s === 'object' && Array.isArray(s.proposals)) {
+        const ids = new Set(top.map((p) => p.id));
+        for (const p of s.proposals) {
+          if (p && typeof p === 'object' && ids.has(p.id)) p.surfaced_count = (typeof p.surfaced_count === 'number' && Number.isFinite(p.surfaced_count) ? p.surfaced_count : 0) + 1;
+        }
+        ensureDir(belayDir());
+        atomicWriteJSON(path, s);
+      }
+    } catch {
+      // bookkeeping only
+    }
+
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: context } }));
+  } catch {
+    // ANY error = silent exit 0: a hook must never break the harness (ADR-4)
+  }
 }
