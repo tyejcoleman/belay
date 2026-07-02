@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import { readStdin, readConfig, toRegExp } from './util.mjs';
+import { readStdin, readConfig, toRegExp, capReason } from './util.mjs';
 import { readKeyoku } from './keyoku.mjs';
 import { readBudget } from './budget.mjs';
 
@@ -139,8 +139,25 @@ export function classify(name, command, cwd, cfg) {
   return null;
 }
 
+/** bypassPermissions sessions auto-resolve "ask" — the action runs with no prompt ever
+ *  shown (observed live 2026-07-02: the gate emitted ask, `git push --dry-run` executed
+ *  anyway). ADR-3's contract is "the question gets asked"; when the harness cannot ask,
+ *  the only way to keep the human in the loop is deny-with-instructions ("deny" IS
+ *  enforced under bypass; "ask" is not). ADR-13. Note the instructions say DISARM, not
+ *  pause: pausing releases only the rope, never the arrest (ADR-12). */
+function escalateForBypass(p, d) {
+  if (!d || d.decision !== 'ask' || p.permission_mode !== 'bypassPermissions') return d;
+  return {
+    decision: 'deny',
+    reason: capReason(
+      `${d.reason}. This session runs bypassPermissions, where an approval prompt cannot be shown — denied instead of silently allowed (ADR-13). To proceed: run this action from a session without bypassPermissions, or fully stand the loop down first (belay_loop_disarm / keyoku goal_unfocus — pause is NOT enough, it keeps the arrest) and retry.`
+    ),
+  };
+}
+
 /**
- * Pure decision: null = exit silently (allow), or { decision: 'ask', reason }.
+ * Pure decision: null = exit silently (allow), or { decision: 'ask'|'deny', reason }
+ * ('ask' escalates to 'deny' under bypassPermissions — see escalateForBypass).
  * `budget` may be null when the caller skipped the read (non-spawn tools).
  */
 export function decideGate(p, k, budget, cfg) {
@@ -158,10 +175,10 @@ export function decideGate(p, k, budget, cfg) {
 
   const hit = classify(name, command, p.cwd, cfg);
   if (hit) {
-    return {
+    return escalateForBypass(p, {
       decision: 'ask',
       reason: `[belay] '${hit.class}' action under autonomous goal — requires human approval (goal constraint policy)${hit.note ? ` — ${hit.note}` : ''}`,
-    };
+    });
   }
 
   // Expensive spawns under thin budget: a subagent is an INDIVISIBLE bet — it can't be
@@ -170,10 +187,10 @@ export function decideGate(p, k, budget, cfg) {
   if (SPAWN_TOOLS.includes(name) && budget) {
     const left = budget.known ? budget.left_pct : budget.stale ? budget.last_known_left : null;
     if (left != null && left < cfg.spawn_floor_pct && !budget.alt) {
-      return {
+      return escalateForBypass(p, {
         decision: 'ask',
         reason: `[belay] budget descent: no new subagents below ${cfg.spawn_floor_pct}% — do the work inline in small steps`,
-      };
+      });
     }
   }
   return null;

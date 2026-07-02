@@ -98,6 +98,15 @@ export function doctor(argv = []) {
     const present = entries.some((m) => (m?.hooks ?? []).some((h) => typeof h?.command === 'string' && h.command.includes(MARK)));
     say(present ? 'ok' : 'warn', `${event} hook ${present ? 'registered' : 'NOT registered — run `belay install`'}`);
   }
+  // bypassPermissions as the DEFAULT mode makes every "ask" a silent allow (observed live
+  // 2026-07-02: the gate asked, `git push --dry-run` ran anyway). ADR-13: the gate
+  // escalates ask → deny under bypass; surface the standing condition here too.
+  for (const f of ['settings.json', 'settings.local.json']) {
+    const s = readJSON(join(dir, f));
+    if (s?.permissions?.defaultMode === 'bypassPermissions') {
+      say('warn', `${f}: permissions.defaultMode is bypassPermissions — approval prompts are never shown, so while an autonomous goal is focused the PreToolUse gate DENIES irreversible actions instead of asking (ADR-13); run pushes/publishes from a non-bypass session`);
+    }
+  }
 
   // ── MCP registration (the belay_status / belay_loop_* / belay_propose surface) ──
   const cjPath = claudeJsonPath();

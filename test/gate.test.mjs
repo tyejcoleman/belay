@@ -27,6 +27,39 @@ test('git push under an autonomous goal → ask with the policy wording', () => 
   assert.equal(reason, "[belay] 'git push' action under autonomous goal — requires human approval (goal constraint policy)");
 });
 
+test('bypassPermissions escalates ask → deny (the harness cannot render an ask there)', () => {
+  const h = armed();
+  const r = gate(h, toolPayload({ permission_mode: 'bypassPermissions', tool_input: { command: 'git push origin main' } }));
+  assert.equal(r.status, 0);
+  const o = JSON.parse(r.stdout).hookSpecificOutput;
+  assert.equal(o.permissionDecision, 'deny');
+  assert.match(o.permissionDecisionReason, /'git push'/);
+  assert.match(o.permissionDecisionReason, /bypassPermissions/);
+  // the instructions must say DISARM, never pause (pause keeps the arrest — ADR-12/13)
+  assert.match(o.permissionDecisionReason, /belay_loop_disarm/);
+  assert.doesNotMatch(o.permissionDecisionReason, /belay_loop_pause/);
+  // ungated commands stay silent even in bypass mode — no over-denying
+  assert.equal(gate(h, toolPayload({ permission_mode: 'bypassPermissions', tool_input: { command: 'git commit -m wip' } })).stdout, '');
+  // every other mode keeps the plain ask
+  const ask = JSON.parse(gate(h, toolPayload({ permission_mode: 'acceptEdits', tool_input: { command: 'git push' } })).stdout);
+  assert.equal(ask.hookSpecificOutput.permissionDecision, 'ask');
+});
+
+test('doctor warns when permissions.defaultMode is bypassPermissions (ADR-13)', () => {
+  const h = homes();
+  mkdirSync(h.config, { recursive: true });
+  writeFileSync(join(h.config, 'settings.json'), JSON.stringify({ permissions: { defaultMode: 'bypassPermissions' } }));
+  const r = run(h, ['doctor']);
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /defaultMode is bypassPermissions/);
+  assert.match(r.stdout, /ADR-13/);
+
+  const h2 = homes();
+  mkdirSync(h2.config, { recursive: true });
+  writeFileSync(join(h2.config, 'settings.json'), JSON.stringify({ permissions: { defaultMode: 'acceptEdits' } }));
+  assert.doesNotMatch(run(h2, ['doctor']).stdout, /bypassPermissions/);
+});
+
 test('npm publish and gh pr merge → ask; plain git commit / gh pr view → silent', () => {
   const h = armed();
   assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'npm publish --access public' } }))), /'npm publish'/);

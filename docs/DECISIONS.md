@@ -273,6 +273,30 @@ currently feeding rope is belay's. The stop-hold condition is otherwise unchange
 scope-matched focused active autonomous goal is held, armed-by-belay or not), and the new
 branch is an unconditional allow, so the ADR-6 termination argument is untouched.
 
+## ADR-13 — bypassPermissions escalates the gate's "ask" to "deny"
+
+**Decision:** In the PreToolUse gate, when the hook payload reports
+`permission_mode: "bypassPermissions"` AND a scope-matched focused **active autonomous**
+goal exists, every decision that would be `ask` (both the irreversible-action classes and
+the thin-budget spawn floor) is escalated to `permissionDecision: "deny"`, with a reason
+that states exactly why and how to proceed: run the action from a session without
+bypassPermissions, or fully stand the loop down first (`belay_loop_disarm` /
+keyoku `goal_unfocus` — pause is NOT enough, ADR-12). In every other permission mode the
+decision stays the plain ADR-3 `ask`. `belay doctor` additionally warns when
+`permissions.defaultMode` is `bypassPermissions` in settings.json/settings.local.json.
+
+**Why:** Observed live 2026-07-02 (HANDOFF-TEST.md TEST A finding #3): under
+`defaultMode: bypassPermissions` the harness auto-resolves `ask` — the gate provably
+emitted `permissionDecision:"ask"` for `git push --dry-run` and the push executed with no
+prompt ever shown. `deny` IS enforced under bypass; `ask` is not. ADR-3's contract is
+"belay makes sure the question gets asked" — when the harness cannot ask, the only way to
+keep the human in the loop is deny-with-instructions. This is NOT a reversal of ADR-3's
+ask-not-deny posture: in every mode where an ask can actually be rendered, ask remains the
+decision; the deny fires only where "ask" would have meant "silently allow", which is the
+exact fall-arrest failure the gate exists to prevent. The escalation applies to the spawn
+floor too, because an unaskable ask is a lie in all cases — the deny reason tells the model
+to do the work inline instead.
+
 ## Non-ADR notes
 
 - **Compliance line (from the mission):** official surfaces only — Stop and PreToolUse
