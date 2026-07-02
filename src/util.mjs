@@ -147,8 +147,13 @@ export function validateConfig(raw) {
   }
   for (const key of ['max_continuations', 'budget_floor_pct', 'spawn_floor_pct', 'thin_budget_pct', 'stale_assess_min', 'proposal_max_surfaced', 'stale_converged_days', 'keyoku_call_timeout_ms']) {
     if (raw[key] === undefined) continue;
-    if (typeof raw[key] === 'number' && Number.isFinite(raw[key]) && raw[key] >= 0) cfg[key] = raw[key];
-    else warnings.push(`config: ${key} must be a non-negative number — using default ${CONFIG_DEFAULTS[key]}`);
+    // keyoku_call_timeout_ms needs a sane floor (refute L2-5): 0 passed the >=0 check and
+    // made EVERY keyoku RPC time out instantly (setTimeout(...,0) fires before spawn+SDK
+    // startup ≈0.5-1s can possibly answer), deterministically breaking the write path
+    // while doctor showed a valid config. Below 1000ms falls back like any bad field.
+    const min = key === 'keyoku_call_timeout_ms' ? 1000 : 0;
+    if (typeof raw[key] === 'number' && Number.isFinite(raw[key]) && raw[key] >= min) cfg[key] = raw[key];
+    else warnings.push(`config: ${key} must be a ${min > 0 ? `number >= ${min}` : 'non-negative number'} — using default ${CONFIG_DEFAULTS[key]}`);
   }
   for (const key of ['gate_enabled', 'proposals_enabled']) {
     if (raw[key] === undefined) continue;

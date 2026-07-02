@@ -411,6 +411,16 @@ test('loop create: FS failure during the arm write → {ok:false, step:arm} with
   assert.equal(JSON.parse(readFileSync(join(h.keyoku, 'focus.json'), 'utf8')).goalId, rows[0].id);
 });
 
+test('config: keyoku_call_timeout_ms below the 1000ms floor falls back to the default with a warning (L2-5)', () => {
+  for (const bad of [0, -5, 999]) {
+    const { cfg, warnings } = validateConfig({ keyoku_call_timeout_ms: bad });
+    assert.equal(cfg.keyoku_call_timeout_ms, 15000, `bad value ${bad} must fall back`);
+    assert.ok(warnings.some((w) => /keyoku_call_timeout_ms must be a number >= 1000/.test(w)), `warned for ${bad}`);
+  }
+  assert.equal(validateConfig({ keyoku_call_timeout_ms: 1000 }).cfg.keyoku_call_timeout_ms, 1000);
+  assert.equal(validateConfig({ keyoku_call_timeout_ms: 30000 }).cfg.keyoku_call_timeout_ms, 30000);
+});
+
 // ── ADR-14: loops are session-scoped by default ─────────────────────────────────────────
 
 test('loop create: SESSION-scoped by default (ADR-14) — no session_id and no scope → refused pre-spawn, keyoku untouched', () => {
