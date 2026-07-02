@@ -1,62 +1,29 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { readJSON, readConfig, tokenroomDir, belayDir } from './util.mjs';
 import { keyokuHome, tailObservation, scopeMatch } from './keyoku.mjs';
 import { configDir, MARK } from './install.mjs';
+import { findKeyokuVersion, parseVersion, KEYOKU_RANGE, stackHealth, renderStackHealth } from './stack.mjs';
 
-// `belay doctor` — the ADR-1 counterweight: we code against keyoku's FILES, not its
-// process, so we ship a layout self-check that verifies the contract still holds on this
-// machine (keyoku's store layer reserves a future SQLite swap; this is where that breaks
-// loudly instead of silently no-opping forever).
+// `belay doctor` — one health view of the whole autonomous stack, then the ADR-1
+// counterweight: we code against keyoku's FILES, not its process, so we ship a layout
+// self-check that verifies the contract still holds on this machine (keyoku's store layer
+// reserves a future SQLite swap; this is where that breaks loudly instead of silently
+// no-opping forever).
 
-const KEYOKU_RANGE = { min: [2, 7], maxExclusive: 3 }; // >=2.7 <3
+export { findKeyokuVersion };
 
-function parseVersion(v) {
-  const m = typeof v === 'string' && v.match(/^(\d+)\.(\d+)(?:\.(\d+))?/);
-  return m ? [Number(m[1]), Number(m[2])] : null;
-}
-
-/** Find keyoku's package.json: $KEYOKU_INSTALL, else walk up from the MCP registration's
- *  script path in ~/.claude.json (top-level and per-project mcpServers). */
-export function findKeyokuVersion() {
-  const candidates = [];
-  if (process.env.KEYOKU_INSTALL) candidates.push(process.env.KEYOKU_INSTALL);
-  const cj = readJSON(join(homedir(), '.claude.json'));
-  const servers = [];
-  if (cj && typeof cj === 'object') {
-    if (cj.mcpServers && typeof cj.mcpServers === 'object') servers.push(...Object.entries(cj.mcpServers));
-    if (cj.projects && typeof cj.projects === 'object') {
-      for (const p of Object.values(cj.projects)) {
-        if (p && typeof p === 'object' && p.mcpServers && typeof p.mcpServers === 'object') servers.push(...Object.entries(p.mcpServers));
-      }
-    }
-  }
-  for (const [name, s] of servers) {
-    if (!/keyoku/i.test(name)) continue;
-    const args = Array.isArray(s?.args) ? s.args : [];
-    for (const a of [s?.command, ...args]) {
-      if (typeof a === 'string' && a.endsWith('.js')) candidates.push(dirname(a));
-    }
-  }
-  for (let base of candidates) {
-    for (let i = 0; i < 5 && base && base !== '/'; i++, base = dirname(base)) {
-      const pkg = readJSON(join(base, 'package.json'));
-      if (pkg && typeof pkg === 'object' && /keyoku/i.test(String(pkg.name ?? ''))) {
-        return { version: typeof pkg.version === 'string' ? pkg.version : null, path: join(base, 'package.json') };
-      }
-    }
-  }
-  return null;
-}
-
-export function doctor() {
+export function doctor(argv = []) {
   const lines = [];
   const say = (level, msg) => lines.push(`  [${level}] ${msg}`);
 
+  // ── full-stack health (tokenroom · keyoku · belay), rendered from the shared checks ──
+  console.log('belay doctor\n\nstack (tokenroom + keyoku + belay)');
+  console.log(renderStackHealth(stackHealth(argv)).join('\n'));
+
   // ── keyoku layout self-check ──
   const home = keyokuHome();
-  console.log(`belay doctor\n\nkeyoku (${home})`);
+  console.log(`\nkeyoku (${home})`);
   if (!existsSync(home)) {
     say('warn', 'keyoku home not found — belay idles (no goals to hold)');
   } else {

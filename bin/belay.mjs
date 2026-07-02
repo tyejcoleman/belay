@@ -22,6 +22,9 @@ switch (cmd) {
   case 'install':
     (await import('../src/install.mjs')).install(argv);
     break;
+  case 'bundle':
+    (await import('../src/bundle.mjs')).bundle(argv);
+    break;
   case 'uninstall':
     (await import('../src/install.mjs')).uninstall(argv);
     break;
@@ -35,10 +38,11 @@ switch (cmd) {
     console.log(`belay — always-on goal loop for Claude Code (reads Keyoku goals + tokenroom budget)
 
 usage:
+  belay bundle [--dry-run] [--config-dir <dir>] [--tokenroom <path>]   wire the whole autonomous stack (tokenroom + keyoku + belay) in one command
   belay install [--dry-run] [--config-dir <dir>]   register the Stop + PreToolUse hooks (additive; preserves existing hooks)
   belay uninstall [--config-dir <dir>]             remove only belay's entries
   belay status                                     current focused goal + would-block verdict + counters
-  belay doctor                                     keyoku layout self-check, tokenroom presence, hook registration, config validity
+  belay doctor                                     full-stack health + keyoku layout self-check, tokenroom presence, hook registration, config validity
   belay hook <stop|pre-tool-use>                   (hook commands — wired by install)
 
 Belay continues work WITHIN a session and advises across sessions; it never launches
