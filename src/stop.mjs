@@ -1,4 +1,4 @@
-import { readStdin, readConfig, fmtClock, toEpochSec } from './util.mjs';
+import { readStdin, readConfig, fmtClock, toEpochSec, sanitizeSlug, capReason } from './util.mjs';
 import { readKeyoku, goalSlug, unmetDetail } from './keyoku.mjs';
 import { readBudget } from './budget.mjs';
 import { readOwnState, sessionEntry, saveSessionEntry } from './state.mjs';
@@ -18,7 +18,7 @@ export function budgetLine(b, cfg) {
     const pct = Math.round(b.left_pct);
     if (b.left_pct < cfg.thin_budget_pct) {
       parts.push(`budget thin (${pct}% left${b.resets_at ? `, resets ${fmtClock(b.resets_at)}` : ''}) — smallest atomic step, checkpoint, then defer via plan_resume if it can't land`);
-      if (b.alt) parts.push(`profile '${b.alt.label}' has ≈${Math.round(b.alt.left_pct)}% — finishing move here, then suggest the user switch`);
+      if (b.alt) parts.push(`profile '${sanitizeSlug(b.alt.label, 32)}' has ≈${Math.round(b.alt.left_pct)}% — finishing move here, then suggest the user switch`); // label is tokenroom-file-controlled (ADR-7)
     } else {
       parts.push(`5h: ${pct}% left`);
     }
@@ -47,7 +47,7 @@ export function decideStop(p, k, budget, cfg, entry, nowSec = Date.now() / 1000)
   if (!k.goal) return { action: 'allow', kind: 'goal-missing' };
 
   const g = k.goal;
-  const slug = goalSlug(g, k.focus);
+  const slug = sanitizeSlug(goalSlug(g, k.focus)); // slug lands in a model-visible reason (ADR-7)
   if (g.status === 'converged') return { action: 'allow', kind: 'converged', note: `[conductor] goal '${slug}' converged — nothing to hold` };
   if (g.status !== 'active') return { action: 'allow', kind: `goal-${g.status}` }; // blocked / abandoned / anything future
   if (g.autonomy !== 'autonomous') return { action: 'allow', kind: 'not-autonomous' }; // ADR-2
@@ -82,12 +82,29 @@ export function decideStop(p, k, budget, cfg, entry, nowSec = Date.now() / 1000)
       kind: 'stale-block',
       save: true,
       entry: { ...entry, staleBlocked: true },
-      reason: `[conductor] goal '${slug}' state is stale (${age}) — run goal_assess first to get ground truth, then act on the fresh verdict (never claim convergence without it).`,
+      reason: capReason(`[conductor] goal '${slug}' state is stale (${age}) — run goal_assess first to get ground truth, then act on the fresh verdict (never claim convergence without it).`),
     };
   }
 
   const unmet = unmetDetail(g, k.obs);
-  if (!unmet || unmet.length === 0) return { action: 'allow', kind: 'nothing-unmet' }; // fresh and nothing unmet → nothing to hold
+  // unmetDetail's null-vs-[] contract (keyoku.mjs): null = UNKNOWN (no readable assessment
+  // observation), [] = affirmatively nothing unmet. We've already passed the stale check,
+  // so freshAt is fresh — a fresh goal with NO readable assessment must NOT be silently
+  // released (that's a fresh-but-unassessed autonomous goal). Block once demanding a
+  // goal_assess, reusing the one-shot staleBlocked guard so it can't loop (ADR-7 flow).
+  if (unmet == null) {
+    if (entry.staleBlocked) {
+      return { action: 'allow', kind: 'unmet-unknown-spent', note: `[conductor] goal '${slug}' still has no readable assessment after the one goal_assess block — allowing stop` };
+    }
+    return {
+      action: 'block',
+      kind: 'unmet-unknown',
+      save: true,
+      entry: { ...entry, staleBlocked: true },
+      reason: capReason(`[conductor] goal '${slug}' has no readable assessment observation — run goal_assess to get ground truth before stopping (never claim convergence without it).` + budgetLine(budget, cfg)),
+    };
+  }
+  if (unmet.length === 0) return { action: 'allow', kind: 'nothing-unmet' }; // fresh and nothing unmet → nothing to hold
 
   // Own continuation budget on top of the harness guard: per (session, goal).
   if (entry.continuations >= cfg.max_continuations) {
@@ -98,15 +115,19 @@ export function decideStop(p, k, budget, cfg, entry, nowSec = Date.now() / 1000)
     };
   }
 
+  // The unmet items are already per-item sanitized (keyoku.unmetDetail); cap the joined
+  // list and the whole reason so a goal with a huge criteria set can't flood context (ADR-7).
+  const unmetStr = capReason(unmet.join('; '), 1200);
   return {
     action: 'block',
     kind: 'block',
     save: true,
     entry: { ...entry, continuations: entry.continuations + 1 },
-    reason:
-      `[conductor] goal '${slug}' not converged — unmet: ${unmet.join('; ')}. ` +
-      `Continue working toward these criteria; when you believe one now passes, run goal_assess to verify (never claim convergence without it).` +
-      budgetLine(budget, cfg),
+    reason: capReason(
+      `[conductor] goal '${slug}' not converged — unmet: ${unmetStr}. ` +
+        `Continue working toward these criteria; when you believe one now passes, run goal_assess to verify (never claim convergence without it).` +
+        budgetLine(budget, cfg)
+    ),
   };
 }
 

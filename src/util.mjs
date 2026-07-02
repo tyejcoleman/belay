@@ -55,6 +55,38 @@ export function toEpochSec(v) {
   return null;
 }
 
+// ── Sanitizers for model-visible reasons (ADR-7) ─────────────────────────────
+// Sibling-goal-derived strings (criteria descriptions, slugs, tokenroom labels) flow into
+// the Stop-hook block reason, which Claude Code feeds back as model-visible context. Treat
+// them as untrusted: strip control chars/newlines, cap length (anti-injection + anti-flood).
+
+// eslint-disable-next-line no-control-regex
+const CONTROL = /[\u0000-\u001f\u007f-\u009f]/g; // C0 + DEL + C1 control chars (incl. newlines/CR/tab)
+
+/** Free text → single-line, control-char-free, length-capped (default 120). */
+export function sanitizeText(s, max = 120) {
+  if (typeof s !== 'string' || !s) return '';
+  let t = s.replace(CONTROL, ' ').replace(/\s+/g, ' ').trim();
+  if (t.length > max) t = t.slice(0, max - 1).trimEnd() + '…';
+  return t;
+}
+
+/** Identifier (slug / criterion id / profile label) → tame charset, length-capped. */
+export function sanitizeSlug(s, max = 64) {
+  if (typeof s !== 'string') return '';
+  const t = s
+    .replace(CONTROL, '')
+    .replace(/[^\w.@/-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, max);
+  return t || 'unknown';
+}
+
+/** Hard cap the whole reason string (belt-and-suspenders against context flooding). */
+export function capReason(s, max = 2048) {
+  return typeof s === 'string' && s.length > max ? s.slice(0, max - 1) + '…' : s;
+}
+
 export function fmtClock(sec) {
   if (!sec) return '?';
   const d = new Date(sec * 1000);

@@ -139,6 +139,27 @@ forced loop (the agent does not control `stop_hook_active`); total blocks per tu
 reached by any non-converging goal after `max_continuations` blocks regardless of budget or
 assessment state, which is the backstop that makes the loop terminating in the worst case.
 
+## ADR-7 — Sanitize sibling-derived strings in model-visible reasons
+
+**Decision:** Every string that originates from another goal's data — the focused goal's
+`slug`, unmet criterion ids and descriptions, and the tokenroom profile `label` — is
+sanitized before it is interpolated into a Stop-hook block `reason` (which Claude Code
+feeds back as model-visible context). Control chars/newlines are stripped, each description
+is capped at 120 chars, the joined unmet list at 1.2 KB, slugs/labels are constrained to a
+tame charset, and the whole reason is capped at ~2 KB.
+
+**Why:** A hostile or careless *sibling* goal (any row in `goals.json`, not necessarily the
+one the user is driving) controls its criteria descriptions and slug; a directly-written
+`profiles.json` controls the label. Those flowed **verbatim, unbounded, unsanitized** into
+the block reason — a prompt-injection channel ("ignore previous instructions…") and a
+context-flood channel (a megabyte of criteria text) aimed straight at the model. Conductor
+is on the harness's critical path and speaks in the harness's own voice, so it must treat
+all cross-goal data as untrusted input. Sanitizing at the boundary keeps the legitimate
+signal (the criteria to work on) while removing the injection/flood surface. The same fresh
+goal with **no readable assessment** (unmetDetail → null, distinct from `[]`) is not
+silently released: conductor blocks once demanding `goal_assess`, reusing the one-shot
+`staleBlocked` guard so it cannot loop.
+
 ## Non-ADR notes
 
 - **Compliance line (from the mission):** official surfaces only — Stop and PreToolUse

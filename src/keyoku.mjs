@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { readJSON } from './util.mjs';
+import { readJSON, sanitizeText, sanitizeSlug } from './util.mjs';
 
 // Keyoku read contract (ADR-1: files, not processes — mapped 2026-07-01 against
 // keyoku 2.12.x source; pinned >=2.7 <3, layout self-checked by `conductor doctor`):
@@ -114,13 +114,18 @@ export const goalSlug = (goal, focus) => {
  * Join unmet criterion IDs ("c1") to their descriptions from goal.criteria.
  * Returns null when the observation carries no unmet array at all (unknown state),
  * [] when it affirmatively says nothing is unmet.
+ *
+ * ids AND descriptions are sibling-goal-controlled data that lands in a model-visible
+ * block reason, so both are sanitized here (ADR-7): ids to a tame charset, descriptions
+ * to single-line control-char-free text capped at 120 chars.
  */
 export function unmetDetail(goal, obs) {
   if (!obs || !Array.isArray(obs.unmet)) return null;
   const ids = obs.unmet.filter((x) => typeof x === 'string' && x);
   const criteria = Array.isArray(goal?.criteria) ? goal.criteria : [];
   return ids.map((id) => {
+    const sid = sanitizeSlug(id, 40);
     const c = criteria.find((c) => c && typeof c === 'object' && c.id === id);
-    return c && typeof c.description === 'string' && c.description ? `${id}: ${c.description}` : id;
+    return c && typeof c.description === 'string' && c.description ? `${sid}: ${sanitizeText(c.description, 120)}` : sid;
   });
 }

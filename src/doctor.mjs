@@ -89,11 +89,13 @@ export function doctor() {
             say('ok', `focus: '${g.slug ?? g.id}' (status ${g.status}, autonomy ${g.autonomy}; ${scope})`);
             if (!scopeMatch(focus, focus.sessionId, focus.cwd ?? process.cwd())) say('warn', 'focus scope self-check failed (unexpected)');
             const obs = tailObservation(join(home, 'observations', `${focus.goalId}.jsonl`));
-            if (!obs) say('warn', `observations/${focus.goalId}.jsonl has no parseable line with an unmet[] — stale-assess path will apply`);
-            else say('ok', `observation tail parses (unmet: ${Array.isArray(obs.unmet) ? JSON.stringify(obs.unmet) : 'absent'}, at ${obs.at ?? '?'})`);
+            if (!obs) {
+              const freshAssess = typeof g.lastAssessedAt === 'string' && Date.parse(g.lastAssessedAt) > Date.now() - 60 * 60 * 1000;
+              say('warn', `observations/${focus.goalId}.jsonl has no parseable line with an unmet[] — conductor will ${freshAssess ? 'block ONCE demanding goal_assess (unmet-unknown), lastAssessedAt is still fresh' : 'take the stale-assess path (lastAssessedAt stale/absent)'}`);
+            } else say('ok', `observation tail parses (unmet: ${Array.isArray(obs.unmet) ? JSON.stringify(obs.unmet) : 'absent'}, at ${obs.at ?? '?'})`);
           }
         }
-        if (!existsSync(join(home, 'observations'))) say('warn', 'observations/ dir missing — unmet criteria unreadable (stale-assess path will apply)');
+        if (!existsSync(join(home, 'observations'))) say('warn', 'observations/ dir missing — unmet criteria unreadable (a fresh goal gets one goal_assess-demanding block; a stale one takes the stale-assess path)');
         else say('ok', `observations/ present (${readdirSync(join(home, 'observations')).length} goal logs)`);
       }
     }
