@@ -19,15 +19,17 @@ export function parseVersion(v) {
   return m ? [Number(m[1]), Number(m[2])] : null;
 }
 
-/** Where Claude Code's `.claude.json` lives. Overridable so a hermetic test can seed one:
- *  $CLAUDE_JSON, else $CLAUDE_CONFIG_DIR/.claude.json when present, else ~/.claude.json. */
+/** Where Claude Code's `.claude.json` lives: $CLAUDE_JSON, else
+ *  $CLAUDE_CONFIG_DIR/.claude.json whenever the dir override is set, else ~/.claude.json.
+ *  When CLAUDE_CONFIG_DIR is set there is deliberately NO existsSync fallthrough to the
+ *  real home file: Claude Code itself keeps .claude.json inside the config dir when the
+ *  override is active, and the old fallthrough silently pointed hermetic test worlds
+ *  (empty config dirs) at the DEVELOPER's real registrations — the refute-audit F1 hole
+ *  where a "hermetic" suite spawned the real keyoku server. Absent file → not registered. */
 export function claudeJsonPath() {
   if (process.env.CLAUDE_JSON) return process.env.CLAUDE_JSON;
   const cd = process.env.CLAUDE_CONFIG_DIR;
-  if (cd) {
-    const p = join(cd, '.claude.json');
-    if (existsSync(p)) return p;
-  }
+  if (cd) return join(cd, '.claude.json');
   return join(homedir(), '.claude.json');
 }
 

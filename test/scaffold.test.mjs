@@ -96,6 +96,29 @@ test('bin: new verbs dispatch to the implemented handlers (exit 0, JSON out, no 
   }
 });
 
+test('bin: loop create is HERMETIC — unregistered world fails closed; the registered server must BE the fixture (refute-audit F1)', () => {
+  // No .claude.json exists in this world's config dir: resolution must fail closed even
+  // on a machine whose real ~/.claude.json registers keyoku — proves the write path can
+  // never fall through to the developer's live server from a hermetic world.
+  const h = homes();
+  const bare = JSON.parse(run(h, ['loop', 'create', '--objective', 'x', '--criteria', '[{"description":"d"}]', '--session-id', 's1']).stdout);
+  assert.equal(bare.ok, false);
+  assert.equal(bare.step, 'spawn');
+  assert.equal(bare.error, 'keyoku MCP server not registered');
+  assert.equal(existsSync(join(h.keyoku, 'goals.json')), false, 'no keyoku process ever ran in this world');
+
+  // With fake-keyoku registered, the refusal text must be the FIXTURE's distinctive
+  // wording — real keyoku's zod message differs ('A goal needs at least one
+  // machine-checkable criterion…'), so this fails loudly if the resolved server is
+  // anything but the fixture.
+  const h2 = homes();
+  writeClaudeJson(h2);
+  const fx = JSON.parse(run(h2, ['loop', 'create', '--objective', 'x', '--criteria', '[]', '--session-id', 's1']).stdout);
+  assert.equal(fx.ok, false);
+  assert.equal(fx.step, 'create');
+  assert.match(fx.error, /goal_create: objective and criteria\[\] are required/);
+});
+
 test('bin: `belay loop` without a known subverb prints usage, exit 2', () => {
   const h = homes();
   const r = run(h, ['loop']);

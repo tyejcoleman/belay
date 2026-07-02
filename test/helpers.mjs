@@ -16,13 +16,21 @@ export function homes() {
   return { base, keyoku: join(base, 'keyoku'), tokenroom: join(base, 'tokenroom'), belay: join(base, 'belay'), config: join(base, 'claude') };
 }
 
-export const env = (h) => ({
-  ...process.env,
-  KEYOKU_HOME: h.keyoku,
-  TOKENROOM_DIR: h.tokenroom,
-  BELAY_DIR: h.belay,
-  CLAUDE_CONFIG_DIR: h.config,
-});
+export const env = (h) => {
+  const e = {
+    ...process.env,
+    KEYOKU_HOME: h.keyoku,
+    TOKENROOM_DIR: h.tokenroom,
+    BELAY_DIR: h.belay,
+    CLAUDE_CONFIG_DIR: h.config,
+  };
+  // Hermeticity (refute-audit F1): nothing in a test world may resolve the DEVELOPER's
+  // real registrations. claudeJsonPath() is ruled by CLAUDE_CONFIG_DIR (no fallthrough),
+  // and the KEYOKU_INSTALL / CLAUDE_JSON escape hatches must not leak in from the shell.
+  delete e.KEYOKU_INSTALL;
+  delete e.CLAUDE_JSON;
+  return e;
+};
 
 /** Spawn the real bin — the tests exercise the exact process the harness runs. */
 export function run(h, args, input) {
