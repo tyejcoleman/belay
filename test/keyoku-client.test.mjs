@@ -188,7 +188,7 @@ test('keyokuSession: hung server → per-call hard timeout, child KILLED, saniti
   assert.ok(Date.now() - t0 < 5000, 'timeout fired at ~300ms, not at some larger default');
 });
 
-test('keyokuSession: child that exits immediately → prompt sanitized rejection carrying single-line stderr, NEVER the env', async () => {
+test('keyokuSession: child that exits immediately → prompt rejection; child stderr CONTENT is never surfaced (L2-3)', async () => {
   const h = homes();
   writeClaudeJson(h, {
     keyokuCmd: {
@@ -201,9 +201,33 @@ test('keyokuSession: child that exits immediately → prompt sanitized rejection
   await withEnv(hermetic(h), async () => {
     await assert.rejects(keyokuSession({ timeoutMs: 5000 }), (e) => {
       assert.match(e.message, /keyoku child exited \(code 7\)/);
-      assert.match(e.message, /boom line one/); // stderr surfaced for diagnosis…
-      assert.doesNotMatch(e.message, /[\n\r]/); // …but sanitized to one line (ADR-7)
-      assert.doesNotMatch(e.message, /hunter2/); // and the registered env is NEVER echoed
+      assert.match(e.message, /stderr is withheld/); // belay-authored text only
+      assert.doesNotMatch(e.message, /boom line one/); // stderr content NEVER surfaces…
+      assert.doesNotMatch(e.message, /[\n\r]/);
+      assert.doesNotMatch(e.message, /hunter2/); // …so the registered env can never ride it
+      return true;
+    });
+  });
+});
+
+test('keyokuSession: a crashing server that ECHOES its registered env to stderr leaks nothing into the error (L2-3 regression)', async () => {
+  // The exact refute repro: keyoku registered with an API key; the server crashes at
+  // startup echoing the key (Gemini-style key-in-URL failure). The MCP-visible error
+  // must carry ZERO stderr content — format-only sanitization cannot redact secrets.
+  const h = homes();
+  writeClaudeJson(h, {
+    keyokuCmd: {
+      type: 'stdio',
+      command: process.execPath,
+      args: ['-e', 'process.stderr.write("FATAL: request to https://gen.example/v1?key=" + process.env.GEMINI_API_KEY + " failed (401)\\n"); process.exit(1)'],
+      env: { GEMINI_API_KEY: 'AIzaFAKESECRET12345' },
+    },
+  });
+  await withEnv(hermetic(h), async () => {
+    await assert.rejects(keyokuSession({ timeoutMs: 5000 }), (e) => {
+      assert.match(e.message, /keyoku child exited \(code 1\)/);
+      assert.doesNotMatch(e.message, /AIzaFAKESECRET12345/); // the secret never surfaces
+      assert.doesNotMatch(e.message, /FATAL|401|gen\.example/); // nor ANY stderr fragment
       return true;
     });
   });

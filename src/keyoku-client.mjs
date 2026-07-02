@@ -15,8 +15,11 @@ import { claudeJsonPath } from './stack.mjs';
 // - Resolve the registered spec {command, args, env} verbatim from ~/.claude.json (reuse
 //   stack.mjs allMcpServers/claudeJsonPath — $CLAUDE_JSON/$CLAUDE_CONFIG_DIR overrides work
 //   in tests); fallback $KEYOKU_INSTALL/dist/index.js; not found → { ok:false, error }.
-// - Child env: pass the registered env through verbatim, but NEVER log/echo env in errors;
-//   sanitize child stderr (ADR-7 sanitizeText) before surfacing anywhere.
+// - Child env: pass the registered env through verbatim, but NEVER log/echo env in errors.
+//   Child stderr/stdout CONTENT is withheld from surfaced errors entirely (refute L2-3):
+//   a crashing server can echo its env (provider SDKs put keys in request URLs; DEBUG
+//   dumps env), and format-only sanitization cannot redact secrets — so transport errors
+//   carry only belay-authored text. Diagnose child failures from keyoku's own logs.
 // - Session: initialize → notifications/initialized → tools/call per step → close stdin
 //   (keyoku's serve() shuts down on stdin end). One child per belay_loop_create/disarm
 //   call; hard timeout per call (cfg.keyoku_call_timeout_ms, default 15000) — child KILLED
@@ -67,9 +70,11 @@ export function resolveKeyokuServer() {
   return { ok: false, error: 'keyoku MCP server not registered' };
 }
 
-/** Error text that may carry child stderr / keyoku messages: single-line, capped, and by
- *  construction never containing the registered env (we never interpolate it anywhere). */
+/** Error text for keyoku PROTOCOL messages and OS spawn errors only — NEVER child
+ *  stderr/stdout content (see the L2-3 note in the header: the registered env can be
+ *  echoed there, and these messages land in the model-visible transcript). */
 const errText = (prefix, detail) => `${prefix}${detail ? `: ${sanitizeText(String(detail), 300)}` : ''}`;
+const STDERR_WITHHELD = 'child stderr is withheld from errors (it can carry the registered env) — check keyoku\'s own logs';
 
 /**
  * Open one short-lived JSON-RPC session against the registered keyoku server.
@@ -93,10 +98,9 @@ export async function keyokuSession({ timeoutMs } = {}) {
   });
 
   let nextId = 1;
-  let stderrTail = '';
   let exited = false;
   const pending = new Map(); // id → { resolve, reject, timer }
-  child.stderr.on('data', (d) => (stderrTail = (stderrTail + d).slice(-2048)));
+  child.stderr.resume(); // drain so the child never blocks on a full pipe — content is NEVER kept or surfaced (L2-3)
 
   const failAll = (msg) => {
     for (const [id, p] of pending) {
@@ -108,7 +112,7 @@ export async function keyokuSession({ timeoutMs } = {}) {
   const exitPromise = new Promise((res) => {
     child.on('close', (code) => {
       exited = true;
-      failAll(errText(`keyoku child exited (code ${code}) before responding`, stderrTail));
+      failAll(`keyoku child exited (code ${code}) before responding — ${STDERR_WITHHELD}`);
       res(code);
     });
   });
@@ -135,7 +139,7 @@ export async function keyokuSession({ timeoutMs } = {}) {
   /** One JSON-RPC request → full response message; timeout KILLS the child (hard stop). */
   const rpc = (method, params) =>
     new Promise((resolve, reject) => {
-      if (exited) return reject(new Error(errText('keyoku child already exited', stderrTail)));
+      if (exited) return reject(new Error(`keyoku child already exited — ${STDERR_WITHHELD}`));
       const id = nextId++;
       const timer = setTimeout(() => {
         pending.delete(id);
@@ -144,7 +148,7 @@ export async function keyokuSession({ timeoutMs } = {}) {
         } catch {
           /* already gone */
         }
-        reject(new Error(errText(`keyoku ${method} timed out after ${perCall}ms (child killed)`, stderrTail)));
+        reject(new Error(`keyoku ${method} timed out after ${perCall}ms (child killed) — ${STDERR_WITHHELD}`));
       }, perCall);
       pending.set(id, { resolve, reject, timer });
       child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
@@ -172,11 +176,12 @@ export async function keyokuSession({ timeoutMs } = {}) {
       const m = await rpc('tools/call', { name: tool, arguments: args });
       if (m.error) throw new Error(errText(`keyoku ${tool} failed`, m.error.message));
       const text = m.result?.content?.[0]?.text;
-      if (typeof text !== 'string') throw new Error(errText(`keyoku ${tool} returned no content`, stderrTail));
+      if (typeof text !== 'string') throw new Error(`keyoku ${tool} returned no content — ${STDERR_WITHHELD}`);
       try {
         return JSON.parse(text);
       } catch {
-        throw new Error(errText(`keyoku ${tool} returned unparseable JSON`, text));
+        // raw child output withheld for the same reason as stderr (L2-3)
+        throw new Error(`keyoku ${tool} returned unparseable JSON (${Buffer.byteLength(text, 'utf8')} bytes — content withheld, it can carry the registered env)`);
       }
     },
     /** End stdin (keyoku's serve() shuts down on stdin end) and await exit; a child that

@@ -230,8 +230,11 @@ store is explicitly cacheless (every read goes to disk; mutations are read-modif
 over the freshest copy), which is the concurrency license for a short-lived second keyoku
 process. The measured spawn cost (160–264ms + SDK startup) is fine per MCP call and
 forbidden per hook (≈44ms budget). The registered spec's `env` passes through to the
-child verbatim but is never logged or echoed in errors, and child stderr is sanitized
-(ADR-7) before surfacing. The version pin >=2.7 <3 stays doctor-checked.
+child verbatim but is never logged or echoed in errors, and child stderr/stdout CONTENT
+is withheld from surfaced errors entirely (hardened 2026-07-02, refute L2-3: a crashing
+server can echo its env — provider SDKs put keys in request URLs, DEBUG modes dump env —
+and format-only ADR-7 sanitization cannot redact secrets, so transport errors carry only
+belay-authored text). The version pin >=2.7 <3 stays doctor-checked.
 
 ## ADR-11 — proposals never act *(PROPOSED — accepted at build convergence)*
 
