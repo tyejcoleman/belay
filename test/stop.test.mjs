@@ -251,6 +251,31 @@ test('state.json writes are per-entry RMW over the freshest copy (L1-1): a stale
   }
 });
 
+test('fresh lastAssessedAt attesting an OLDER observation tail → one goal_assess-demanding block, never a release (L1-2)', () => {
+  const h = homes();
+  // goals.json says assessed 10s ago, but the only observation tail is an old convergence
+  // line (unmet:[]) — the fresh assess's observation append never landed (keyoku appends
+  // best-effort AFTER saving goals.json). Before the fix: silent allow 'nothing-unmet'.
+  writeKeyoku(h, {
+    goals: [goal({ lastAssessedAt: iso(nowSec() - 10) })],
+    focus: focusFor(),
+    obsLines: [obs({ unmet: [], at: iso(nowSec() - 3 * 86400) })],
+  });
+  writeTokenroom(h);
+  const out = JSON.parse(stop(h).stdout);
+  assert.equal(out.decision, 'block');
+  assert.match(out.reason, /observation never landed/);
+  assert.match(out.reason, /goal_assess/);
+  // one-shot (reuses staleBlocked): the second stop allows — no wedge
+  assert.equal(stop(h).stdout, '');
+
+  // control: a tail at/after the assess is attested — normal convergence release stands
+  const ok = homes();
+  writeKeyoku(ok, { goals: [goal({ lastAssessedAt: iso(nowSec() - 600) })], focus: focusFor(), obsLines: [obs({ unmet: [], at: iso(nowSec() - 10) })] });
+  writeTokenroom(ok);
+  assert.equal(stop(ok).stdout, '');
+});
+
 test('quotaScope withhold (L4-1): unmapped session on a 2-account machine never acts on the top-level pointer', () => {
   // Refute repro: the top-level pointer (last-writer-wins across accounts) says 2% left —
   // ANOTHER account's number. An unmapped session used to take the budget-floor release

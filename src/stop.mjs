@@ -103,12 +103,24 @@ export function decideStop(p, k, budget, cfg, entry, nowSec = Date.now() / 1000,
     };
   }
 
-  const unmet = unmetDetail(g, k.obs);
+  const unmetRaw = unmetDetail(g, k.obs);
+  // Fresh attestation over an OLDER tail (refute L1-2): keyoku persists goals.json (the
+  // fresh lastAssessedAt) BEFORE the best-effort observation append, and append failures
+  // are swallowed — so a fresh lastAssessedAt can vouch for tail content that predates
+  // it (e.g. a months-old convergence `unmet:[]` line releasing the hold on stale ground
+  // truth). Same-run writes land obs.at AFTER lastAssessedAt (ms apart, one process), so
+  // an obs older than the assess minus a small slack means THIS assess's observation
+  // never landed: the content is UNKNOWN, not fresh.
+  const OBS_ATTEST_SLACK_SEC = 5;
+  const assessedAt = toEpochSec(g.lastAssessedAt);
+  const obsAt = toEpochSec(k.obs?.at);
+  const tailPredates = unmetRaw != null && assessedAt != null && obsAt != null && obsAt < assessedAt - OBS_ATTEST_SLACK_SEC;
+  const unmet = tailPredates ? null : unmetRaw;
   // unmetDetail's null-vs-[] contract (keyoku.mjs): null = UNKNOWN (no readable assessment
   // observation), [] = affirmatively nothing unmet. We've already passed the stale check,
-  // so freshAt is fresh — a fresh goal with NO readable assessment must NOT be silently
-  // released (that's a fresh-but-unassessed autonomous goal). Block once demanding a
-  // goal_assess, reusing the one-shot staleBlocked guard so it can't loop (ADR-7 flow).
+  // so freshAt is fresh — a fresh goal with NO readable (or no ATTESTED, L1-2) assessment
+  // must NOT be silently released. Block once demanding a goal_assess, reusing the
+  // one-shot staleBlocked guard so it can't loop (ADR-7 flow).
   if (unmet == null) {
     if (entry.staleBlocked) {
       return { action: 'allow', kind: 'unmet-unknown-spent', note: `[belay] goal '${slug}' still has no readable assessment after the one goal_assess block — allowing stop` };
@@ -118,7 +130,11 @@ export function decideStop(p, k, budget, cfg, entry, nowSec = Date.now() / 1000,
       kind: 'unmet-unknown',
       save: true,
       entry: { ...entry, staleBlocked: true },
-      reason: capReason(`[belay] goal '${slug}' has no readable assessment observation — run goal_assess to get ground truth before stopping (never claim convergence without it).` + budgetLine(budget, cfg)),
+      reason: capReason(
+        (tailPredates
+          ? `[belay] goal '${slug}' was assessed recently but its assessment observation never landed (the tail predates lastAssessedAt) — run goal_assess to re-establish ground truth before stopping (never claim convergence without it).`
+          : `[belay] goal '${slug}' has no readable assessment observation — run goal_assess to get ground truth before stopping (never claim convergence without it).`) + budgetLine(budget, cfg)
+      ),
     };
   }
   if (unmet.length === 0) return { action: 'allow', kind: 'nothing-unmet' }; // fresh and nothing unmet → nothing to hold
