@@ -58,7 +58,7 @@
 #### T1 `belay_status` — one call, the whole loop brain
 ```json
 { "name": "belay_status",
-  "description": "One composed view: stack health, budget (attributed), focused goal + unmet criteria, loop arm/pause state, counters, and the exact would-block verdict the Stop hook would return right now. Every figure is read from state files; nothing is estimated by belay.",
+  "description": "One composed view: stack health, budget (attributed), focused goal + unmet criteria, loop arm/pause state, counters, and the would-block verdict the Stop hook would return right now. Every reported figure is read from state files; nothing is estimated or fabricated by belay — counters and the EXACT verdict need a session identity, so with no session_id and no session-pinned focus they come back unattributed (withheld) and the verdict is explicitly marked zero-history.",
   "inputSchema": { "type": "object", "properties": {
       "session_id": { "type": "string", "description": "this session's id if known — enables exact per-account budget attribution and per-session counters" },
       "cwd": { "type": "string", "description": "working directory to evaluate scope against (default: the server process cwd)" }

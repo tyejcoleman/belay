@@ -92,7 +92,13 @@ export function status() {
   }
   if (budget.alt) console.log(`  alt profile: '${budget.alt.label}' ≈${Math.round(budget.alt.left_pct)}% left (fresh)`);
 
-  console.log(`  counters: ${entry.continuations}/${cfg.max_continuations} continuations · stale-block ${entry.staleBlocked ? 'spent' : 'available'} (session ${payload.session_id})`);
+  // No fabrication (refute L4-2): with no sessionId pin there is no per-(session,goal)
+  // row to read — say so instead of presenting the zero-history default as a figure.
+  if (payload.session_id === 'status-probe' && k.goal) {
+    console.log(`  counters: unattributed — focus has no sessionId pin; per-session spends unknown (verdict below assumes zero history and can differ from the driving session's)`);
+  } else {
+    console.log(`  counters: ${entry.continuations}/${cfg.max_continuations} continuations · stale-block ${entry.staleBlocked ? 'spent' : 'available'} (session ${payload.session_id})`);
+  }
   console.log(`  verdict: would ${d.action.toUpperCase()} (${d.kind})${d.reason ? `\n    reason: ${d.reason}` : ''}${d.note ? `\n    note: ${d.note}` : ''}`);
   proposalsLine();
 }

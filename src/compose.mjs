@@ -139,6 +139,12 @@ export function buildStatus({ session_id, cwd } = {}) {
   const budget = attributedBudget(sessionId, nowSec);
   const k = readKeyoku({ sessionId: sessionId ?? 'status-probe', cwd: effCwd });
   const own = readOwnState();
+  // No fabrication (refute L4-2): counters are keyed per (session, goal) in state.json.
+  // With no session_id and no focus pin there is NO row to read — sessionEntry would
+  // return the zero-history DEFAULT for a phantom key, and 0/25 would be reported as if
+  // file-sourced (opposite verdicts from the real driving session's hook were reproduced).
+  // So: figures are withheld as `unattributed`, and the verdict is explicitly marked as
+  // zero-history — the same posture the budget block already takes (ADR-24 mirror).
   const entry = sessionEntry(own, sessionId ?? 'status-probe', k.goal?.id ?? null);
   // The SAME pure function the Stop hook runs — read-only here: the mutated counter
   // entry decideStop hands back is deliberately NOT persisted (like status.mjs).
@@ -183,12 +189,29 @@ export function buildStatus({ session_id, cwd } = {}) {
   if (d.reason) verdict.reason = d.reason;
   if (d.note) verdict.note = d.note;
 
+  let counters;
+  if (sessionId || !k.goal) {
+    // With no matched goal the verdict is session-independent and the zero counters are
+    // the true value for EVERY session (entries are keyed per goal) — nothing to withhold.
+    counters = { continuations: entry.continuations, max: cfg.max_continuations, staleBlocked: entry.staleBlocked };
+  } else {
+    counters = {
+      continuations: null,
+      max: cfg.max_continuations,
+      staleBlocked: null,
+      attribution:
+        'unattributed — no session_id was given and the focus has no sessionId pin; counters are per-(session, goal) rows in ~/.belay/state.json, so no figure can be truthfully reported (pass this session’s id for exact counters and the exact hook verdict)',
+    };
+    verdict.attribution =
+      "computed with ZERO per-session history (no session_id) — the driving session's real verdict can differ: its continuation and stale-block spends are unknown here";
+  }
+
   return {
     stack: stackView(dir),
     budget,
     goal,
     loop,
-    counters: { continuations: entry.continuations, max: cfg.max_continuations, staleBlocked: entry.staleBlocked },
+    counters,
     verdict,
     proposals_open,
   };

@@ -305,6 +305,38 @@ test("belay_status: exactly 1 account active in the last 10min + no session_id �
   }
 });
 
+// ── belay_status: counters/verdict are never fabricated (refute L4-2) ──────────────────
+
+test('belay_status: unpinned focus + no session_id → counters UNATTRIBUTED and verdict marked zero-history, never a fabricated 0/25', async () => {
+  const h = homes();
+  // the exact refute repro: cwd-scoped focus with NO sessionId pin; the real driving
+  // session sits at 25/25 in state.json — its own Stop hook would ALLOW (continuations-
+  // exhausted), while the phantom 'status-probe' entry used to report block + 0/25.
+  writeKeyoku(h, { goals: [goal()], focus: focusFor(), obsLines: [obs()] });
+  writeTokenroom(h, { leftPct: 68 });
+  mkdirSync(h.belay, { recursive: true });
+  writeFileSync(join(h.belay, 'state.json'), JSON.stringify({ sessions: { 'real-sid': { goalId: 'goal_test1', continuations: 25, staleBlocked: false, updated_at: nowSec() } } }));
+
+  const s = mcpSession(h);
+  try {
+    const anon = await callTool(s, 'belay_status', { cwd: '/tmp/proj' });
+    assert.equal(anon.counters.continuations, null); // withheld, never the phantom 0
+    assert.equal(anon.counters.staleBlocked, null);
+    assert.match(anon.counters.attribution, /unattributed/);
+    assert.match(anon.verdict.attribution, /ZERO per-session history/);
+
+    const exact = await callTool(s, 'belay_status', { session_id: 'real-sid', cwd: '/tmp/proj' });
+    assert.equal(exact.counters.continuations, 25); // the file-sourced figure
+    assert.equal(exact.counters.staleBlocked, false);
+    assert.equal(exact.counters.attribution, undefined);
+    assert.equal(exact.verdict.attribution, undefined);
+    assert.equal(exact.verdict.action, 'allow'); // matches the real hook: continuations-exhausted
+    assert.equal(exact.verdict.kind, 'continuations-exhausted');
+  } finally {
+    await s.close();
+  }
+});
+
 // ── belay_loop_list: goals × focus × loops × counters (T3) ────────────────────────────
 
 test('belay_loop_list: focused, armed/paused, armable, and stale-converged rows compose; human-gated and fresh-converged goals are excluded', async () => {
