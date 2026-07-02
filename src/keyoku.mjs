@@ -1,0 +1,116 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { readJSON } from './util.mjs';
+
+// Keyoku read contract (ADR-1: files, not processes — mapped 2026-07-01 against
+// keyoku 2.12.x source; pinned >=2.7 <3, layout self-checked by `conductor doctor`):
+//   $KEYOKU_HOME || ~/.keyoku
+//   paused                       marker file — present means conductor no-ops entirely
+//   focus.json                   {goalId, goalSlug?, cwd?, sessionId?, at} — GLOBAL singleton
+//   goals.json                   array of goal rows (atomic whole-array writes)
+//   observations/<goalId>.jsonl  append-only; tail line ≈ {unmet:[ids], summary, at}
+// All keyoku writes are atomic tmp+rename or single-line appends → concurrent reads are
+// safe; torn trailing JSONL lines are skipped. We NEVER run probes (arbitrary shell,
+// 300s timeouts) and NEVER write focus.json/goals.json (whole-array clobber risk).
+// Every field may be absent or malformed: anything unparseable → treat as no-goal → no-op.
+
+export const keyokuHome = () => process.env.KEYOKU_HOME || join(homedir(), '.keyoku');
+
+/**
+ * Scope-match mirrors keyoku's own autoRecordToFocusGoal: a sessionId pin that does not
+ * match → not ours; otherwise a cwd pin matches by subtree in either direction
+ * (a===b || a startsWith b+'/' || b startsWith a+'/'); an unscoped focus matches all.
+ * A cwd-scoped focus with no payload cwd is treated as NOT matched (we cannot prove
+ * the scope, and the failure mode of a wrong match is blocking a stranger's stop).
+ */
+export function scopeMatch(focus, sessionId, cwd) {
+  if (typeof focus?.sessionId === 'string' && focus.sessionId) {
+    if (focus.sessionId !== sessionId) return false;
+  }
+  if (typeof focus?.cwd === 'string' && focus.cwd) {
+    if (typeof cwd !== 'string' || !cwd) return false;
+    const a = cwd.replace(/\/+$/, '');
+    const b = focus.cwd.replace(/\/+$/, '');
+    return a === b || a.startsWith(b + '/') || b.startsWith(a + '/');
+  }
+  return true;
+}
+
+/**
+ * Latest usable observation: walk back from the tail, skip torn/unparseable lines,
+ * prefer the most recent line that actually carries an `unmet` array (assessment/
+ * convergence records); fall back to the last parseable line for freshness only.
+ */
+export function tailObservation(path) {
+  let text;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch {
+    return null;
+  }
+  let lastParseable = null;
+  const lines = text.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    let o;
+    try {
+      o = JSON.parse(line);
+    } catch {
+      continue; // torn trailing line (append in flight) — keep walking back
+    }
+    if (!o || typeof o !== 'object') continue;
+    if (Array.isArray(o.unmet)) return o;
+    lastParseable ??= o;
+  }
+  return lastParseable;
+}
+
+/**
+ * One snapshot per hook invocation (3 file reads, ~10ms):
+ * {home, present, paused, focus, matched, goal, obs}. Any missing/malformed layer stops
+ * the descent and leaves the deeper fields null — callers treat that as "no goal".
+ */
+export function readKeyoku({ sessionId, cwd } = {}) {
+  const home = keyokuHome();
+  const out = { home, present: false, paused: false, focus: null, matched: false, goal: null, obs: null };
+  if (!existsSync(home)) return out;
+  out.present = true;
+  if (existsSync(join(home, 'paused'))) {
+    out.paused = true;
+    return out;
+  }
+  const focus = readJSON(join(home, 'focus.json'));
+  if (!focus || typeof focus !== 'object' || typeof focus.goalId !== 'string' || !focus.goalId) return out;
+  out.focus = focus;
+  out.matched = scopeMatch(focus, sessionId, cwd);
+  if (!out.matched) return out;
+  const goals = readJSON(join(home, 'goals.json'));
+  if (!Array.isArray(goals)) return out; // corrupted / future-SQLite layout → no-goal (doctor flags it)
+  const goal = goals.find((g) => g && typeof g === 'object' && g.id === focus.goalId);
+  if (!goal || typeof goal.status !== 'string') return out;
+  out.goal = goal;
+  out.obs = tailObservation(join(home, 'observations', `${focus.goalId}.jsonl`));
+  return out;
+}
+
+export const goalSlug = (goal, focus) => {
+  for (const v of [goal?.slug, focus?.goalSlug, goal?.id]) if (typeof v === 'string' && v) return v;
+  return 'unknown';
+};
+
+/**
+ * Join unmet criterion IDs ("c1") to their descriptions from goal.criteria.
+ * Returns null when the observation carries no unmet array at all (unknown state),
+ * [] when it affirmatively says nothing is unmet.
+ */
+export function unmetDetail(goal, obs) {
+  if (!obs || !Array.isArray(obs.unmet)) return null;
+  const ids = obs.unmet.filter((x) => typeof x === 'string' && x);
+  const criteria = Array.isArray(goal?.criteria) ? goal.criteria : [];
+  return ids.map((id) => {
+    const c = criteria.find((c) => c && typeof c === 'object' && c.id === id);
+    return c && typeof c.description === 'string' && c.description ? `${id}: ${c.description}` : id;
+  });
+}
