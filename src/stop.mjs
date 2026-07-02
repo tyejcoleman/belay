@@ -33,9 +33,13 @@ export function budgetLine(b, cfg) {
  * to stdout as the block JSON, `entry` is the mutated counter record to persist.
  */
 export function decideStop(p, k, budget, cfg, entry, nowSec = Date.now() / 1000) {
-  // Claude Code's own infinite-loop guard: this stop already came from a hook
-  // continuation. ALWAYS respect it.
-  if (p.stop_hook_active === true) return { action: 'allow', kind: 'stop-hook-active' };
+  // ADR-6: we no longer blanket-allow on Claude Code's stop_hook_active guard — that
+  // capped the loop at ONE forced continuation per turn and let the stale-block consume
+  // it. Instead, a FRESH stop (stop_hook_active !== true) starts a new continuation
+  // chain and resets this (session, goal)'s budget; MID-CHAIN stops (stop_hook_active
+  // === true) accumulate against it. Termination is then governed by conductor's own
+  // bounded guards (max_continuations, the one-shot stale/unknown block) — see ADR-6.
+  if (p.stop_hook_active !== true) entry = { ...entry, continuations: 0, staleBlocked: false };
   if (!k.present) return { action: 'allow', kind: 'keyoku-absent' };
   if (k.paused) return { action: 'allow', kind: 'paused' };
   if (!k.focus) return { action: 'allow', kind: 'no-focus' };
@@ -111,7 +115,9 @@ export async function hookStop() {
   // bin already wraps hooks in a choke-point try/catch; this inner one keeps the
   // never-crash rule local too (ADR-4) — a Stop hook error would wedge the harness.
   try {
-    if (p.stop_hook_active === true) return; // cheapest exit, no file reads
+    // No stop_hook_active fast-exit anymore (ADR-6): mid-chain stops must be evaluated
+    // so the continuation budget can accumulate and eventually allow. decideStop resets
+    // the budget on a FRESH chain and bounds it on mid-chain stops.
     const k = readKeyoku({ sessionId: p.session_id, cwd: p.cwd });
     if (!k.present || k.paused || !k.focus || !k.matched || !k.goal) return;
     const { cfg } = readConfig();

@@ -31,13 +31,38 @@ test('focused autonomous goal + unmet + healthy budget → block JSON with unmet
   }
 });
 
-test('stop_hook_active === true → always allow (respects Claude Code loop guard)', () => {
+test('mid-chain stop (stop_hook_active:true) with unmet criteria still BLOCKS (ADR-6: no blanket allow)', () => {
+  // The old code blanket-allowed on stop_hook_active, capping the loop at one forced
+  // continuation. Now a mid-chain stop is evaluated and blocks like any other.
   const h = homes();
   writeKeyoku(h, { goals: [goal()], focus: focusFor(), obsLines: [obs()] });
-  writeTokenroom(h);
+  writeTokenroom(h, { leftPct: 72 });
   const r = stop(h, stopPayload({ stop_hook_active: true }));
   assert.equal(r.status, 0);
-  assert.equal(r.stdout, '');
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.decision, 'block');
+  assert.match(out.reason, /not converged/);
+});
+
+test('continuation loop is BOUNDED: a chain of mid-chain stops blocks up to max_continuations, then allows (ADR-6 termination)', () => {
+  const h = homes();
+  writeKeyoku(h, { goals: [goal()], focus: focusFor(), obsLines: [obs()] });
+  writeTokenroom(h, { leftPct: 72 });
+  mkdirSync(h.conductor, { recursive: true });
+  writeFileSync(join(h.conductor, 'config.json'), JSON.stringify({ max_continuations: 3 }));
+
+  // fresh chain start resets the budget, then blocks (0→1)
+  assert.equal(JSON.parse(stop(h).stdout).decision, 'block');
+  // mid-chain stops accumulate: 1→2, 2→3
+  assert.equal(JSON.parse(stop(h, stopPayload({ stop_hook_active: true })).stdout).decision, 'block');
+  assert.equal(JSON.parse(stop(h, stopPayload({ stop_hook_active: true })).stdout).decision, 'block');
+  // 3 >= max_continuations → the loop terminates (allow) even though criteria stay unmet
+  const done = stop(h, stopPayload({ stop_hook_active: true }));
+  assert.equal(done.stdout, '');
+  assert.match(done.stderr, /continuation budget exhausted for goal 'ship-widget' \(3\/3 this session\)/);
+
+  // a NEW fresh chain (stop_hook_active:false) resets the budget → blocks again
+  assert.equal(JSON.parse(stop(h).stdout).decision, 'block');
 });
 
 test('observe / suggest / approve goals never self-continue', () => {
@@ -123,7 +148,8 @@ test('continuation counter exhaustion → allow with stderr note; counter resets
   writeTokenroom(h);
   mkdirSync(h.conductor, { recursive: true });
   writeFileSync(join(h.conductor, 'state.json'), JSON.stringify({ sessions: { s1: { goalId: 'goal_test1', continuations: 25, staleBlocked: false, updated_at: nowSec() } } }));
-  const r = stop(h);
+  // MID-CHAIN stop (stop_hook_active:true) so the pre-seeded counter is not reset (ADR-6)
+  const r = stop(h, stopPayload({ stop_hook_active: true }));
   assert.equal(r.stdout, '');
   assert.match(r.stderr, /continuation budget exhausted for goal 'ship-widget' \(25\/25 this session\) — allowing stop/);
 
@@ -146,7 +172,7 @@ test('stale assessment → exactly one "run goal_assess" block, then allow', () 
   assert.equal(out.decision, 'block');
   assert.match(out.reason, /state is stale \(last assessed 120m ago\) — run goal_assess first to get ground truth/);
 
-  const second = stop(h);
+  const second = stop(h, stopPayload({ stop_hook_active: true })); // mid-chain: staleBlocked persists (ADR-6)
   assert.equal(second.stdout, '', 'stale-block is spent — must allow');
   assert.match(second.stderr, /still stale after the one stale-block/);
 
@@ -317,8 +343,8 @@ test('config overrides: max_continuations and stale_assess_min honored; bad conf
   writeTokenroom(h);
   mkdirSync(h.conductor, { recursive: true });
   writeFileSync(join(h.conductor, 'config.json'), JSON.stringify({ max_continuations: 1, stale_assess_min: 'sixty' }));
-  assert.equal(JSON.parse(stop(h).stdout).decision, 'block'); // 0 → 1
-  const r = stop(h); // 1 >= 1 → exhausted
+  assert.equal(JSON.parse(stop(h).stdout).decision, 'block'); // fresh chain: reset then 0 → 1
+  const r = stop(h, stopPayload({ stop_hook_active: true })); // mid-chain: 1 >= 1 → exhausted
   assert.equal(r.stdout, '');
   assert.match(r.stderr, /\(1\/1 this session\)/);
 });

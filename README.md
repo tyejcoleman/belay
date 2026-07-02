@@ -53,7 +53,7 @@ removes only conductor's entries.
 
 | # | Condition (checked in order) | Decision |
 |---|---|---|
-| 1 | `stop_hook_active === true` | **allow** (Claude Code's own loop guard — always respected) |
+| 1 | `stop_hook_active === true` (mid-chain stop) | **evaluated normally** — conductor substitutes its OWN bounded budget for the harness guard (ADR-6): the continuation counter accumulates and eventually allows. A FRESH stop (`false`) resets that budget, starting a new chain. |
 | 2 | keyoku home absent, or `paused` marker present | **allow**, silent |
 | 3 | no/unreadable `focus.json`, focused goal missing from `goals.json` | **allow**, silent |
 | 4 | scope mismatch (focus `sessionId` differs; or the **session cwd is not inside** the focus `cwd` subtree — one-way, ADR-5) | **allow**, silent |
@@ -65,7 +65,7 @@ removes only conductor's entries.
 | 10 | assessment stale (> `stale_assess_min`, 60m — or never assessed), stale-block not yet spent | **block once**: "state is stale — run goal_assess first to get ground truth" |
 | 11 | assessment stale, stale-block already spent | **allow** + stderr note |
 | 12 | fresh observation with nothing unmet | **allow**, silent |
-| 13 | continuations ≥ `max_continuations` (25) for this (session, goal) | **allow** + stderr note |
+| 13 | continuations ≥ `max_continuations` (25) for this (session, goal) chain | **allow** + stderr note (this is the ADR-6 termination bound; the counter resets when a fresh chain starts) |
 | 14 | autonomous + unmet criteria + budget above floor | **BLOCK** with unmet `id: description` list + budget line; counter++ |
 
 Budget line in a block: healthy → `5h: X% left`; thin (<15%) → `budget thin (X% left,
@@ -90,7 +90,7 @@ data) → block carries **no** budget line (permissive for stop decisions — ne
 
 ```jsonc
 {
-  "max_continuations": 25,     // per (session, goal) stop-blocks before conductor lets go
+  "max_continuations": 25,     // forced continuations per chain (session, goal) before conductor lets go; resets each fresh turn
   "budget_floor_pct": 3,       // below this (no fresh alt): allow stop (descent)
   "spawn_floor_pct": 10,       // below this (no fresh alt): ask before new subagents
   "thin_budget_pct": 15,       // below this the block reason switches to descent wording

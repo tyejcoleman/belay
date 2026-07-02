@@ -89,6 +89,56 @@ A genuinely global focus (no sessionId, no cwd) still matches all — that is a 
 user explicitly chose. If ancestor/orchestrator sessions must be holdable, the opt-in is an
 explicit `sessionId` pin, never a cwd subtree guess.
 
+## ADR-6 — Conductor's own bounded budget replaces the stop_hook_active blanket-allow
+
+**Decision:** The Stop hook no longer blanket-allows when Claude Code's `stop_hook_active`
+flag is `true`. Instead: a **fresh** stop (`stop_hook_active !== true`) starts a new
+continuation *chain* and resets this `(session, goal)`'s counters (`continuations = 0`,
+`staleBlocked = false`); a **mid-chain** stop (`stop_hook_active === true`) is evaluated
+normally and accumulates against that budget. Termination is governed entirely by
+conductor's own guards.
+
+**Why:** Every stop that follows a hook-forced continuation carries
+`stop_hook_active: true` (that is exactly the flag Claude Code sets when a Stop hook
+returns `{"decision":"block"}`). Blanket-allowing on it capped the goal loop at **one**
+forced continuation per turn: `max_continuations` (25) was unreachable, and if that single
+continuation was spent by the one-shot **stale-block**, the "keep working on unmet
+criteria" push never fired at all. The whole point of the feature — hold the session while
+the goal is unconverged — was defeated. The tests masked it by sending every synthetic
+stop with `stop_hook_active: false`, so the early-allow was never exercised; they now model
+the real contract (mid-chain stops carry `true`).
+
+**Termination argument (why the loop is still provably bounded without the guard):**
+Let a *chain* be the maximal run of stops beginning with a fresh stop
+(`stop_hook_active: false`) followed by zero or more mid-chain stops
+(`stop_hook_active: true`). `stop_hook_active` only becomes `true` **because conductor
+blocked** the previous stop in the chain, and it returns to `false` only after conductor
+**allows** (the chain ends, control returns to the user). Within one chain, for a fixed
+`(session, goal)`:
+
+1. **Unmet-criteria block** increments `entry.continuations` and persists it
+   (`saveSessionEntry`, atomic write to `~/.conductor/state.json`). The counter is
+   monotonically non-decreasing across the chain (mid-chain stops do not reset it), and
+   once `continuations >= max_continuations` the decision is `allow` (`continuations-exhausted`).
+   So this path fires **at most `max_continuations` times per chain**.
+2. **Stale block** and **unmet-unknown block** (ADR-7) are each one-shot: they set
+   `entry.staleBlocked = true` and persist it; the next time the same condition holds with
+   the flag already set, the decision is `allow` (`stale-spent` / `unmet-unknown-spent`).
+   So these fire **at most once per chain**.
+3. Every other branch is an unconditional `allow` (absent/paused/no-focus/scope-mismatch/
+   goal-missing/converged/non-active/non-autonomous/iterations-exhausted/budget-floor/
+   nothing-unmet).
+
+The only branches that BLOCK are (1) and (2), each independently bounded, so a chain emits
+at most `max_continuations + 1` blocks and then can only `allow` — **the chain terminates**.
+Because `session_id` is stable for a session and the counter is durable across the
+per-stop process spawns, the bound holds across the whole chain. Chains are separated by a
+genuine allow + fresh user turn, so the per-turn reset cannot be triggered from inside a
+forced loop (the agent does not control `stop_hook_active`); total blocks per turn ≤
+`max_continuations + 1`. All allow-guards are reachable: `continuations-exhausted` is
+reached by any non-converging goal after `max_continuations` blocks regardless of budget or
+assessment state, which is the backstop that makes the loop terminating in the worst case.
+
 ## Non-ADR notes
 
 - **Compliance line (from the mission):** official surfaces only — Stop and PreToolUse
