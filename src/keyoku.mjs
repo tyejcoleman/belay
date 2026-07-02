@@ -18,11 +18,20 @@ import { readJSON } from './util.mjs';
 export const keyokuHome = () => process.env.KEYOKU_HOME || join(homedir(), '.keyoku');
 
 /**
- * Scope-match mirrors keyoku's own autoRecordToFocusGoal: a sessionId pin that does not
- * match → not ours; otherwise a cwd pin matches by subtree in either direction
- * (a===b || a startsWith b+'/' || b startsWith a+'/'); an unscoped focus matches all.
- * A cwd-scoped focus with no payload cwd is treated as NOT matched (we cannot prove
- * the scope, and the failure mode of a wrong match is blocking a stranger's stop).
+ * Scope-match for a BLOCKING decision (ADR-5). Deliberately STRICTER than keyoku's own
+ * autoRecordToFocusGoal attribution: a sessionId pin that does not match → not ours;
+ * otherwise a cwd pin matches ONLY when the SESSION's cwd is inside the focus subtree
+ * (a === b || a startsWith b + '/') — ONE-WAY, on purpose.
+ *
+ * Keyoku attributes bidirectionally (either dir), but attribution is advisory; conductor
+ * BLOCKS a stop, so it must be conservative. The dropped direction (focus.cwd inside the
+ * SESSION cwd) is exactly the hole: a session running at an ANCESTOR of the goal's cwd
+ * (an orchestrator at the repo root, or a shell at '/' or $HOME) would match every focus
+ * and get its stop held for a goal it is not driving — until keyoku pins a sessionId.
+ * The trailing-slash strip is guarded so an empty string (from cwd '/') cannot match
+ * everything. An unscoped focus (no sessionId, no cwd) still matches all — that is a
+ * genuinely global focus the user set. A cwd-scoped focus with no payload cwd → NOT
+ * matched (we cannot prove scope, and a wrong match blocks a stranger's stop).
  */
 export function scopeMatch(focus, sessionId, cwd) {
   if (typeof focus?.sessionId === 'string' && focus.sessionId) {
@@ -32,7 +41,8 @@ export function scopeMatch(focus, sessionId, cwd) {
     if (typeof cwd !== 'string' || !cwd) return false;
     const a = cwd.replace(/\/+$/, '');
     const b = focus.cwd.replace(/\/+$/, '');
-    return a === b || a.startsWith(b + '/') || b.startsWith(a + '/');
+    if (!a || !b) return false; // '/' strips to '' — must never match everything
+    return a === b || a.startsWith(b + '/');
   }
   return true;
 }

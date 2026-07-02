@@ -73,11 +73,32 @@ test('scope: sessionId mismatch and cwd outside the subtree → not ours, allow'
   writeKeyoku(byCwd, { goals: [goal()], focus: focusFor(), obsLines: [obs()] });
   assert.equal(stop(byCwd, stopPayload({ cwd: '/tmp/other-project' })).stdout, '');
 
-  // subtree matches both directions
+  // session cwd INSIDE the focus subtree still matches (the one direction we keep)
   const child = homes();
   writeKeyoku(child, { goals: [goal()], focus: focusFor(), obsLines: [obs()] });
   writeTokenroom(child);
   assert.match(JSON.parse(stop(child, stopPayload({ cwd: '/tmp/proj/packages/core' })).stdout).reason, /not converged/);
+});
+
+test('scope one-way (ADR-5): an ANCESTOR / "/" / "$HOME" session is NOT held by a deeper focus', () => {
+  // focus is pinned deep inside a repo; the stopping session runs at an ANCESTOR dir
+  // (an orchestrator at the repo root). The OLD bidirectional match blocked it — wrong.
+  const ancestor = homes();
+  writeKeyoku(ancestor, { goals: [goal()], focus: focusFor({ cwd: '/tmp/proj/packages/core' }), obsLines: [obs()] });
+  writeTokenroom(ancestor);
+  assert.equal(stop(ancestor, stopPayload({ cwd: '/tmp/proj' })).stdout, '', 'ancestor session must not be held');
+
+  // a session sitting at "/" must never be matched by any cwd-scoped focus
+  const root = homes();
+  writeKeyoku(root, { goals: [goal()], focus: focusFor({ cwd: '/tmp/proj' }), obsLines: [obs()] });
+  writeTokenroom(root);
+  assert.equal(stop(root, stopPayload({ cwd: '/' })).stdout, '', 'session at / must not be held');
+
+  // a focus pinned at "/" (strips to "") must not match every session
+  const rootFocus = homes();
+  writeKeyoku(rootFocus, { goals: [goal()], focus: focusFor({ cwd: '/' }), obsLines: [obs()] });
+  writeTokenroom(rootFocus);
+  assert.equal(stop(rootFocus, stopPayload({ cwd: '/tmp/proj' })).stdout, '', 'focus at / must not match everything');
 });
 
 test('converged → allow with stderr one-liner; blocked/abandoned → silent allow', () => {

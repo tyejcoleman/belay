@@ -56,7 +56,7 @@ removes only conductor's entries.
 | 1 | `stop_hook_active === true` | **allow** (Claude Code's own loop guard — always respected) |
 | 2 | keyoku home absent, or `paused` marker present | **allow**, silent |
 | 3 | no/unreadable `focus.json`, focused goal missing from `goals.json` | **allow**, silent |
-| 4 | scope mismatch (focus `sessionId` differs; or focus `cwd` not in subtree either direction) | **allow**, silent |
+| 4 | scope mismatch (focus `sessionId` differs; or the **session cwd is not inside** the focus `cwd` subtree — one-way, ADR-5) | **allow**, silent |
 | 5 | goal `converged` | **allow** + stderr `goal converged — nothing to hold` |
 | 6 | goal `blocked` / `abandoned` / unknown status | **allow**, silent |
 | 7 | autonomy `observe` / `suggest` / `approve` | **allow**, silent (only `autonomous` goals self-continue) |

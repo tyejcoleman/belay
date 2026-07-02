@@ -69,6 +69,26 @@ scope humility: conductor must be a strict no-op for normal interactive use — 
 focused autonomous goal, no behavior. Own state is hardened like tokenroom's
 (dirs 0700, files 0600, atomic tmp+rename writes).
 
+## ADR-5 — Scope match is ONE-WAY for a blocking decision
+
+**Decision:** For the Stop hook (and the gate), a cwd-scoped focus matches a session only
+when the **session's cwd is inside the focus subtree** (`a === b || a.startsWith(b + '/')`).
+Conductor does **not** mirror keyoku's bidirectional attribution (which also matches when
+the focus cwd is inside the session cwd). The trailing-slash strip is guarded so a cwd of
+`/` (which strips to `''`) can never match everything.
+
+**Why:** keyoku's `autoRecordToFocusGoal` matches either direction because attribution is
+advisory — a wrong guess just mis-labels a recorded action. Conductor makes a **blocking**
+decision, so it must be conservative. Under the old bidirectional rule, a session running
+in an **ancestor** of the goal's cwd matched the focus — so an orchestrator at the repo
+root, or any shell at `/` or `$HOME`, would have its Stop **held for a goal it is not
+driving**, for as long as the focus stayed cwd-only (keyoku pins `sessionId` only on the
+first matching action, so cwd-only focus is the normal initial state). The failure mode of
+a wrong match is blocking a stranger's stop; one-way matching removes that class entirely.
+A genuinely global focus (no sessionId, no cwd) still matches all — that is a scope the
+user explicitly chose. If ancestor/orchestrator sessions must be holdable, the opt-in is an
+explicit `sessionId` pin, never a cwd subtree guess.
+
 ## Non-ADR notes
 
 - **Compliance line (from the mission):** official surfaces only — Stop and PreToolUse
