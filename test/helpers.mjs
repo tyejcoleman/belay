@@ -7,6 +7,7 @@ import { createInterface } from 'node:readline';
 
 export const bin = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'belay.mjs');
 export const fakeKeyokuBin = resolve(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'fake-keyoku.mjs');
+export const refocusFixtureBin = resolve(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'refocus-then-fake-keyoku.mjs');
 export const nowSec = () => Math.round(Date.now() / 1000);
 export const iso = (sec) => new Date(sec * 1000).toISOString();
 

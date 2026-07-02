@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { homes, run, goal, focusFor, obs, writeKeyoku, writeTokenroom, writeLoops, writeProposals, writeClaudeJson, stopPayload, toolPayload, nowSec, iso } from './helpers.mjs';
+import { homes, run, goal, focusFor, obs, writeKeyoku, writeTokenroom, writeLoops, writeProposals, writeClaudeJson, refocusFixtureBin, stopPayload, toolPayload, nowSec, iso } from './helpers.mjs';
 
 // T1/T2: the loop lifecycle (arm/pause/resume/disarm + prune), the ONE new stop.mjs
 // branch (loop-paused → allow, ADR-12), and belay_loop_create's dual-mode pipeline driven
@@ -339,6 +339,24 @@ test('loop create (proposal): --proposal-id marks the proposal armed and records
   const props = JSON.parse(readFileSync(join(h.belay, 'proposals.json'), 'utf8')).proposals;
   assert.equal(props.find((p) => p.id === 'prop-1').status, 'armed');
   assert.equal(props.find((p) => p.id === 'prop-2').status, 'open'); // only the armed one flips
+});
+
+test('loop disarm: focus grabbed by ANOTHER goal inside the spawn window → unfocus SKIPPED, stranger focus intact (L2-1)', () => {
+  const h = homes();
+  // register the race harness as THE keyoku server: on spawn it re-focuses goal_other —
+  // exactly what a concurrent belay_loop_create completing in the window leaves behind
+  writeClaudeJson(h, {
+    keyokuCmd: { type: 'stdio', command: process.execPath, args: [refocusFixtureBin], env: { KEYOKU_HOME: h.keyoku, REFOCUS_GOAL_ID: 'goal_other' } },
+  });
+  writeKeyoku(h, { goals: [goal(), goal({ id: 'goal_other', slug: 'other-loop' })], focus: focusFor() }); // focus = goal_test1 at resolve time
+  writeLoops(h, { goal_test1: {} });
+  const out = JSON.parse(run(h, ['loop', 'disarm', 'ship-widget']).stdout);
+  assert.equal(out.ok, true);
+  assert.equal(out.unfocused, false); // refused to blind-clear
+  assert.match(out.note, /never blind-clears/);
+  const focus = JSON.parse(readFileSync(join(h.keyoku, 'focus.json'), 'utf8'));
+  assert.equal(focus.goalId, 'goal_other'); // the other session's armed loop keeps its hold + fall-arrest
+  assert.equal(readLoopsFile(h).loops.goal_test1, undefined); // own arm state still cleared
 });
 
 // ── ADR-14: loops are session-scoped by default ─────────────────────────────────────────

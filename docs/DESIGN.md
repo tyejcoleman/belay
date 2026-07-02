@@ -126,7 +126,7 @@ Source: `goals.json` (rows: status/autonomy/lastAssessedAt/convergedAt) × `focu
   "inputSchema": { "type": "object", "properties": { "goal": { "type": "string" } }, "required": ["goal"], "additionalProperties": false } }
 ```
 - pause/resume: write `loops.json` only (no spawn). resume sets `staleBlocked:false` for matching session entries (forces a re-assess demand — never resumes onto stale truth).
-- disarm: keyoku-child `goal_unfocus` (only if the focused goalId matches the argument — never blind-clears someone else's focus) + `loops.json` entry removed.
+- disarm: keyoku-child `goal_unfocus` (only if the focused goalId matches the argument — never blind-clears someone else's focus; the match is re-checked AFTER the child spawn, immediately before the RPC, so a focus grabbed by a concurrent arm in the ~1s spawn window is left untouched) + `loops.json` entry removed.
 
 #### T7 `belay_propose`
 ```json

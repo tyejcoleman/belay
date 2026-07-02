@@ -348,6 +348,7 @@ export async function loopDisarm({ goal } = {}) {
 
   const focus = readJSON(join(keyokuHome(), 'focus.json')); // read-only — belay never writes it
   let unfocused = false;
+  let focusChanged = false;
   if (focus && typeof focus === 'object' && focus.goalId === goalId) {
     let session;
     try {
@@ -356,9 +357,22 @@ export async function loopDisarm({ goal } = {}) {
       return { ok: false, step: 'spawn', error: sanitizeText(e?.message ?? String(e), 300) };
     }
     try {
-      const out = await session.call('goal_unfocus', {});
-      if (out?.error) return { ok: false, step: 'unfocus', error: sanitizeText(String(out.error), 400) };
-      unfocused = true;
+      // Check-then-act guard (refute L2-1): the pre-spawn read above is ~0.5-1s stale by
+      // the time the child is up, and keyoku's goal_unfocus is argument-less — a blind
+      // clear of whatever focus exists at execution time. Re-read focus.json HERE, after
+      // the spawn and immediately before the RPC: if a concurrent session focused a
+      // DIFFERENT goal in the window (a completing belay_loop_create), skip the unfocus —
+      // never blind-clear someone else's focus (their armed loop would silently lose both
+      // the Stop hold and the fall-arrest). The residual race shrinks to the file-read →
+      // RPC microseconds; full elimination needs a keyoku compare-and-clear API.
+      const fresh = readJSON(join(keyokuHome(), 'focus.json'));
+      if (fresh && typeof fresh === 'object' && fresh.goalId === goalId) {
+        const out = await session.call('goal_unfocus', {});
+        if (out?.error) return { ok: false, step: 'unfocus', error: sanitizeText(String(out.error), 400) };
+        unfocused = true;
+      } else {
+        focusChanged = true;
+      }
     } catch (e) {
       return { ok: false, step: 'unfocus', error: sanitizeText(e?.message ?? String(e), 300) };
     } finally {
@@ -370,5 +384,9 @@ export async function loopDisarm({ goal } = {}) {
   delete state.loops[goalId];
   state.loops = pruneLoops(state.loops, goals);
   writeLoopsState(state.loops);
-  return { ok: true, goalId, disarmed: true, unfocused };
+  const res = { ok: true, goalId, disarmed: true, unfocused };
+  if (focusChanged) {
+    res.note = "focus moved to another goal between resolve and unfocus — left untouched (belay never blind-clears someone else's focus); this goal's arm state was still cleared";
+  }
+  return res;
 }
