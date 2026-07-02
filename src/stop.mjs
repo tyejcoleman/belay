@@ -2,6 +2,7 @@ import { readStdin, readConfig, fmtClock, toEpochSec, sanitizeSlug, capReason } 
 import { readKeyoku, goalSlug, unmetDetail } from './keyoku.mjs';
 import { readBudget } from './budget.mjs';
 import { readOwnState, sessionEntry, saveSessionEntry } from './state.mjs';
+import { readLoops } from './loops.mjs';
 
 // The Stop hook: hold the session open while the focused Keyoku goal is unconverged,
 // the goal is AUTONOMOUS (ADR-2: observe/suggest/approve all imply a human in the loop),
@@ -31,8 +32,13 @@ export function budgetLine(b, cfg) {
  * Returns { action: 'allow'|'block', kind, reason?, note?, save?, entry? } —
  * `note` goes to stderr (observability, never harness-visible context), `reason`
  * to stdout as the block JSON, `entry` is the mutated counter record to persist.
+ *
+ * `loops` = the loops.json map (injectable for tests); when not passed, the ONE extra
+ * defensive file read happens here (§3.2: ~0.1ms, only reached once a focused matched
+ * goal exists), so the hook and compose.mjs's 5-arg call return the same verdict.
+ * Absent/malformed loops.json → {} → today's decision table exactly (ADR-4).
  */
-export function decideStop(p, k, budget, cfg, entry, nowSec = Date.now() / 1000) {
+export function decideStop(p, k, budget, cfg, entry, nowSec = Date.now() / 1000, loops = null) {
   // ADR-6: we no longer blanket-allow on Claude Code's stop_hook_active guard — that
   // capped the loop at ONE forced continuation per turn (making max_continuations
   // unreachable) and let the one-shot stale-block consume it. We deliberately do NOT reset
@@ -49,6 +55,14 @@ export function decideStop(p, k, budget, cfg, entry, nowSec = Date.now() / 1000)
 
   const g = k.goal;
   const slug = sanitizeSlug(goalSlug(g, k.focus)); // slug lands in a model-visible reason (ADR-7)
+
+  // ADR-12: a paused loop releases the ROPE only — an unconditional allow, so the ADR-6
+  // termination argument is untouched (blocks remain the two capped paths). The PreToolUse
+  // arrest never consults loops.json; only disarm (unfocus) deactivates it.
+  if (((loops ?? readLoops().loops)[g.id] ?? {}).paused === true) {
+    return { action: 'allow', kind: 'loop-paused', note: `[belay] loop for goal '${slug}' is paused (belay_loop_resume to re-arm) — allowing stop` };
+  }
+
   if (g.status === 'converged') return { action: 'allow', kind: 'converged', note: `[belay] goal '${slug}' converged — nothing to hold` };
   if (g.status !== 'active') return { action: 'allow', kind: `goal-${g.status}` }; // blocked / abandoned / anything future
   if (g.autonomy !== 'autonomous') return { action: 'allow', kind: 'not-autonomous' }; // ADR-2
