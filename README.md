@@ -15,12 +15,15 @@ budget — and never spawns their processes from hooks.
 
 ## The honest scope line
 
-Belay **continues work within a session** and **advises across sessions**. It never
-launches headless runs, never reuses credentials, never calls the network, and never
-burns quota outside the interactive session you are already in. When the session ends,
-belay's job ends; the most it does for "later" is wording in a block reason
-(checkpoint, `plan_resume`, "suggest the user switch profiles"). That's the compliance
-line, on purpose.
+Belay **continues work within a session** and **advises across sessions**. It runs on
+**official Claude Code surfaces only** — the Stop hook and the PreToolUse hook, plus your
+own dotfiles. It never launches headless runs, never reuses or reads credentials, never
+calls the network, and never burns quota outside the interactive session you are already
+in. **The human always approves irreversible actions** (push, publish, external sends,
+destructive deletes route to `permissionDecision: "ask"`, even under an autonomous goal).
+When the session ends, belay's job ends; the most it does for "later" is wording in a
+block reason (checkpoint, `plan_resume`, "suggest the user switch profiles"). That's the
+compliance line, on purpose.
 
 ## What it does
 
@@ -37,17 +40,41 @@ line, on purpose.
 - **No-op by default** — no focused autonomous goal means belay does nothing at all.
   It never polices normal interactive use.
 
-## Install
+## Quick start — zero to an armed autonomous loop
+
+The stack has three legs: **tokenroom** (resource awareness), **keyoku** (goal
+convergence MCP), and **belay** (this Stop + PreToolUse loop). One command wires them:
 
 ```sh
 git clone <this repo> && cd belay
-node bin/belay.mjs install     # registers Stop + PreToolUse hooks (additive; backs up settings.json)
-node bin/belay.mjs doctor      # verifies keyoku layout, tokenroom presence, hook registration, config
+node bin/belay.mjs bundle          # wire the whole stack (see `bundle --dry-run` to preview)
+node bin/belay.mjs doctor          # one health view of all three legs
 ```
 
-`install` preserves every existing hook (tokenroom's included), never duplicates on
-re-run, and refuses to install from the npx cache (evictable paths). `uninstall`
-removes only belay's entries.
+`belay bundle` (a) detects tokenroom (via `--tokenroom <path>`, `$TOKENROOM_BIN`, or
+`which tokenroom`) and runs **its** installer — or prints "install tokenroom first" and
+continues; (b) verifies the **keyoku** MCP server is registered in `.claude.json`
+(read-only — belay never modifies or restarts keyoku); (c) installs belay's own Stop +
+PreToolUse hooks **additively** (tokenroom's and every other hook preserved), refusing the
+npx cache and never duplicating on re-run. It is idempotent — re-run it any time.
+
+Then **arm an autonomous loop** (all in Keyoku):
+
+1. **Create a goal** with *machine-checkable* success criteria — each criterion is a probe
+   (shell / HTTP / MCP call) plus an assertion over its output (`goal_create`). If a
+   criterion can't be checked by a command, it can't drive the loop.
+2. **Focus** the goal (`goal_focus`) — this scopes the loop to this session / cwd.
+3. Set the goal's **autonomy to `autonomous`** (belay self-continues *only* autonomous
+   goals; `observe`/`suggest`/`approve` always allow the stop — a human is in the loop).
+4. `belay doctor` — confirm all three legs are green.
+
+Now just work. When you try to end the turn with a criterion still unmet, belay's Stop
+hook hands the unmet criteria back and keeps you going; when `goal_assess` reports
+convergence (or the budget/continuation floor is hit), it lets you stop. Irreversible or
+external actions (push, publish, sends) still pause for your approval the whole time.
+
+Prefer to wire belay alone (tokenroom/keyoku already set up)? `node bin/belay.mjs install`
+registers just the two hooks; `uninstall` removes only belay's entries.
 
 ## Decision table
 
@@ -123,10 +150,11 @@ and `belay doctor` reports the warning. Bad config never crashes a hook.
 ## CLI
 
 ```
-belay install [--dry-run] [--config-dir <dir>]
+belay bundle [--dry-run] [--config-dir <dir>] [--tokenroom <path>]   wire the whole stack (tokenroom + keyoku + belay)
+belay install [--dry-run] [--config-dir <dir>]   register just belay's Stop + PreToolUse hooks (additive)
 belay uninstall [--config-dir <dir>]
 belay status      # focused goal + would-block verdict + counters
-belay doctor      # keyoku layout self-check, version pin, tokenroom, hooks, config
+belay doctor      # full-stack health + keyoku layout self-check, version pin, tokenroom, hooks, config
 belay hook <stop|pre-tool-use>   # wired by install
 ```
 
