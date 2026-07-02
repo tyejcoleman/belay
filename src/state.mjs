@@ -30,11 +30,30 @@ export function sessionEntry(state, sessionId, goalId) {
 }
 
 export function saveSessionEntry(state, sessionId, entry, nowSec = Date.now() / 1000) {
-  for (const k of Object.keys(state.sessions)) {
-    const e = state.sessions[k];
-    if (!e || typeof e !== 'object' || nowSec - (typeof e.updated_at === 'number' ? e.updated_at : 0) > PRUNE_SEC) delete state.sessions[k];
+  // Per-entry read-modify-write over the FRESHEST copy (refute L1-1): the caller's
+  // snapshot can be tens of ms old (hookStop holds it across readBudget + decideStop),
+  // and writing that snapshot back wholesale reverted counter increments a CONCURRENT
+  // stop hook had just persisted — eroding the ADR-6 bound one lost update at a time.
+  // Re-reading at write time shrinks the race to the read→rename microseconds and merges
+  // ONLY our entry — the same last-writer-wins-per-entry (never per-file) discipline
+  // keyoku's store documents. Atomic rename still prevents torn files.
+  const fresh = readOwnState();
+  for (const k of Object.keys(fresh.sessions)) {
+    const e = fresh.sessions[k];
+    if (!e || typeof e !== 'object' || nowSec - (typeof e.updated_at === 'number' ? e.updated_at : 0) > PRUNE_SEC) delete fresh.sessions[k];
   }
-  state.sessions[sessionId || 'unknown'] = { ...entry, updated_at: nowSec };
+  fresh.sessions[sessionId || 'unknown'] = { ...entry, updated_at: nowSec };
   ensureDir(belayDir());
-  atomicWriteJSON(statePath(), state);
+  atomicWriteJSON(statePath(), fresh);
+  state.sessions[sessionId || 'unknown'] = fresh.sessions[sessionId || 'unknown']; // keep the caller's snapshot coherent
+}
+
+/** Multi-entry updates with the same L1-1 discipline: read-fresh → mutate → write.
+ *  `fn` mutates the fresh state in place and returns true when something changed. */
+export function mutateOwnState(fn) {
+  const fresh = readOwnState();
+  if (fn(fresh) !== true) return false;
+  ensureDir(belayDir());
+  atomicWriteJSON(statePath(), fresh);
+  return true;
 }

@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import { belayDir, readJSON, ensureDir, atomicWriteJSON, sanitizeText, sanitizeSlug, toEpochSec } from './util.mjs';
 import { keyokuHome, goalSlug } from './keyoku.mjs';
-import { readOwnState, saveSessionEntry } from './state.mjs';
+import { mutateOwnState } from './state.mjs';
 import { keyokuSession } from './keyoku-client.mjs';
 
 // Loop lifecycle state: ~/.belay/loops.json (docs/DESIGN.md §3.1). Owner: agent B (round 1).
@@ -220,19 +220,21 @@ export async function loopCreate(args = {}) {
   };
   writeLoopsState(state.loops);
 
-  const own = readOwnState();
-  let countersDirty = false;
-  for (const [sid, e] of Object.entries(own.sessions)) {
-    if (e && typeof e === 'object' && e.goalId === row.id) {
-      own.sessions[sid] = { ...e, continuations: 0, staleBlocked: false };
-      countersDirty = true;
+  // Fresh-copy per-entry RMW (L1-1) — never write a stale whole-map snapshot back.
+  mutateOwnState((own) => {
+    let dirty = false;
+    for (const [sid, e] of Object.entries(own.sessions)) {
+      if (e && typeof e === 'object' && e.goalId === row.id) {
+        own.sessions[sid] = { ...e, continuations: 0, staleBlocked: false };
+        dirty = true;
+      }
     }
-  }
-  if (sessionId) saveSessionEntry(own, sessionId, { goalId: row.id, continuations: 0, staleBlocked: false }, nowSec);
-  else if (countersDirty) {
-    ensureDir(belayDir());
-    atomicWriteJSON(join(belayDir(), 'state.json'), own);
-  }
+    if (sessionId) {
+      own.sessions[sessionId] = { goalId: row.id, continuations: 0, staleBlocked: false, updated_at: nowSec };
+      dirty = true;
+    }
+    return dirty;
+  });
 
   let proposalMarked = false;
   if (proposalId) {
@@ -318,18 +320,17 @@ export function loopResume({ goal } = {}) {
 
   // Never resume onto stale truth: the one-shot stale-block spend is refunded for every
   // session driving this goal, so the first stop after resume demands a goal_assess.
-  const own = readOwnState();
-  let dirty = false;
-  for (const [sid, se] of Object.entries(own.sessions)) {
-    if (se && typeof se === 'object' && se.goalId === goalId && se.staleBlocked === true) {
-      own.sessions[sid] = { ...se, staleBlocked: false };
-      dirty = true;
+  // Fresh-copy per-entry RMW (L1-1) — never write a stale whole-map snapshot back.
+  mutateOwnState((own) => {
+    let dirty = false;
+    for (const [sid, se] of Object.entries(own.sessions)) {
+      if (se && typeof se === 'object' && se.goalId === goalId && se.staleBlocked === true) {
+        own.sessions[sid] = { ...se, staleBlocked: false };
+        dirty = true;
+      }
     }
-  }
-  if (dirty) {
-    ensureDir(belayDir());
-    atomicWriteJSON(join(belayDir(), 'state.json'), own);
-  }
+    return dirty;
+  });
   return { ok: true, goalId, paused: false };
 }
 

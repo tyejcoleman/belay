@@ -227,6 +227,30 @@ test('budget below floor: no alt → allow stop (descent); fresh alt → keep bl
   assert.equal(stop(staleAlt).stdout, '');
 });
 
+test('state.json writes are per-entry RMW over the freshest copy (L1-1): a stale snapshot cannot revert a concurrent increment', async () => {
+  const h = homes();
+  const prev = process.env.BELAY_DIR;
+  process.env.BELAY_DIR = h.belay;
+  try {
+    const { readOwnState, saveSessionEntry } = await import('../src/state.mjs');
+    // session A persisted continuations 24
+    saveSessionEntry(readOwnState(), 'A', { goalId: 'g', continuations: 24, staleBlocked: false });
+    // hook B snapshots the file (sees A:24) and holds it across its decision…
+    const staleSnapshot = readOwnState();
+    // …while hook A concurrently increments and persists A:25…
+    saveSessionEntry(readOwnState(), 'A', { goalId: 'g', continuations: 25, staleBlocked: false });
+    // …then hook B persists ITS entry from the stale snapshot. Before the fix this wrote
+    // the whole stale map back, silently reverting A to 24 (ADR-6 bound erosion).
+    saveSessionEntry(staleSnapshot, 'B', { goalId: 'g', continuations: 1, staleBlocked: false });
+    const final = JSON.parse(readFileSync(join(h.belay, 'state.json'), 'utf8'));
+    assert.equal(final.sessions.A.continuations, 25); // the winner's increment survives
+    assert.equal(final.sessions.B.continuations, 1);
+  } finally {
+    if (prev === undefined) delete process.env.BELAY_DIR;
+    else process.env.BELAY_DIR = prev;
+  }
+});
+
 test('quotaScope withhold (L4-1): unmapped session on a 2-account machine never acts on the top-level pointer', () => {
   // Refute repro: the top-level pointer (last-writer-wins across accounts) says 2% left —
   // ANOTHER account's number. An unmapped session used to take the budget-floor release

@@ -135,7 +135,13 @@ the per-stop process spawns. Consider the stops for this pair in order:
 
 The only branches that BLOCK are (1) and (2), and both are hard-capped for the pair, so
 belay emits **at most `max_continuations + 1` blocks per `(session, goal)`** and
-thereafter can only `allow`. This holds for *any* interleaving of `stop_hook_active` values
+thereafter can only `allow`. *(2026-07-02 hardening, refute L1-1: the proof implicitly
+assumed serialized access — a concurrent stop hook writing a stale whole-map snapshot
+could revert a just-persisted increment, degrading the bound one lost update per
+ms-precision collision. `saveSessionEntry` now re-reads the freshest file at write time
+and merges only its own entry (per-entry last-writer-wins, keyoku-store discipline), and
+the loop-create/resume multi-entry writes go through the same `mutateOwnState` fresh-copy
+path, shrinking the race window from tens of ms to the read→rename microseconds.)* This holds for *any* interleaving of `stop_hook_active` values
 (including all-`false` and all-`true`), so the loop is provably terminating. All
 allow-guards are reachable: `continuations-exhausted` is reached by any non-converging
 autonomous goal after `max_continuations` blocks regardless of every other input — it is the
