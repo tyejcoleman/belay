@@ -95,6 +95,14 @@ explicit `sessionId` pin, never a cwd subtree guess.
   hooks plus the user's own dotfiles. Conductor continues work within a session and
   advises across sessions; it never launches headless runs and never touches
   credentials.
-- **profiles.json shape** is read maximally defensively (map, array, or `{profiles:[]}`;
-  `left_pct`/`used_pct`/nested `five_hour`) because tokenroom R3.5 is being built in
-  parallel; re-check once it ships.
+- **profiles.json shape** — tokenroom R3.5 shipped: the real file is
+  `{profiles:{<label>:{keys:[...], last_seen, last_windows_snapshot:{at, five_hour:{used_pct,
+  resets_at}}}}}` (mapped 2026-07-01 against tokenroom `src/accounts.mjs`
+  `writeProfiles`/`updateProfileSnapshot`). `pickAltProfile` now iterates
+  `Object.entries(raw.profiles)` for that map shape and `normalizeProfile` reads
+  `left = 100 - five_hour.used_pct`, `at = snapshot.at ?? last_seen`, and `resets_at` from
+  `five_hour.resets_at`; a profile self-excludes by any of its `keys[]` buckets, and a
+  reading past its `resets_at` is dropped (wrong-signed, mirroring `readBudget`'s
+  crossedReset rule). Older shapes (flat map, array, `{profiles:[]}`, top-level
+  `left_pct`/`used_pct`) are still parsed defensively. Before this fix `budget.alt` was
+  always `null` against real data — every alt-profile behavior was inert.

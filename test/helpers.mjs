@@ -77,9 +77,29 @@ export function writeTokenroom(h, { leftPct = 72, resetsInMin = 180, estTokens =
   );
 }
 
+/**
+ * Write profiles.json in tokenroom's REAL shape (src/accounts.mjs):
+ *   { profiles: { <label>: { keys, last_seen, last_windows_snapshot:{ at, five_hour:{used_pct,resets_at} } } } }
+ * Accepts a per-label options bag: { left_pct|leftPct, updated_at|at|updatedAgoSec,
+ * resetsInMin|resetsAt, keys }. Kept back-compatible with the old
+ * `{ work: { left_pct, updated_at } }` call sites — they now exercise the real contract.
+ */
 export function writeProfiles(h, profiles) {
   mkdirSync(h.tokenroom, { recursive: true });
-  writeFileSync(join(h.tokenroom, 'profiles.json'), JSON.stringify(profiles));
+  const out = {};
+  for (const [label, o = {}] of Object.entries(profiles)) {
+    const at = o.at ?? o.updated_at ?? nowSec() - (o.updatedAgoSec ?? 60);
+    const leftPct = o.leftPct ?? o.left_pct ?? 0;
+    out[label] = {
+      keys: o.keys ?? [`key-${label}`],
+      last_seen: at,
+      last_windows_snapshot: {
+        at,
+        five_hour: { used_pct: 100 - leftPct, resets_at: o.resetsAt ?? nowSec() + (o.resetsInMin ?? 180) * 60 },
+      },
+    };
+  }
+  writeFileSync(join(h.tokenroom, 'profiles.json'), JSON.stringify({ profiles: out }));
 }
 
 export const stopPayload = (over = {}) => ({ session_id: 's1', cwd: '/tmp/proj', stop_hook_active: false, ...over });

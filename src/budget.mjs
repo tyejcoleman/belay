@@ -26,18 +26,28 @@ function stateDirFor(root, sessionId, nowSec) {
   return { dir: root, key: null };
 }
 
+// tokenroom's REAL profiles.json (src/accounts.mjs writeProfiles/updateProfileSnapshot,
+// verified 2026-07-01): { profiles: { <label>: { keys:[...], last_seen, config_dir?,
+//   last_windows_snapshot: { at, five_hour:{used_pct, resets_at}, seven_day:{...} } } } }.
+// Older/defensive shapes (flat map, array, {profiles:[...]}, top-level left_pct/used_pct)
+// are still parsed. left = 100 - five_hour.used_pct; timestamp = snapshot.at ?? last_seen;
+// resets_at from five_hour.resets_at; a profile OWNS several bucket `keys`.
 function normalizeProfile(label, e) {
   if (!e || typeof e !== 'object') return null;
+  const snap = e.last_windows_snapshot && typeof e.last_windows_snapshot === 'object' ? e.last_windows_snapshot : null;
+  const fh = snap?.five_hour && typeof snap.five_hour === 'object' ? snap.five_hour : null;
   let left = clampPct(e.left_pct);
   if (left == null) {
-    const used = clampPct(e.used_pct) ?? clampPct(e.five_hour?.used_pct) ?? clampPct(e.windows?.five_hour?.used_pct);
+    const used = clampPct(e.used_pct) ?? clampPct(e.five_hour?.used_pct) ?? clampPct(e.windows?.five_hour?.used_pct) ?? clampPct(fh?.used_pct);
     if (used != null) left = 100 - used;
   }
-  const at = toEpochSec(e.updated_at ?? e.at ?? e.seen_at);
+  const at = toEpochSec(e.updated_at ?? e.at ?? snap?.at ?? e.last_seen ?? e.seen_at);
   const name = [e.label, e.name, label].find((v) => typeof v === 'string' && v);
   if (!name || left == null || at == null) return null;
+  const resets_at = toEpochSec(e.resets_at ?? e.five_hour?.resets_at ?? fh?.resets_at);
   const key = typeof e.key === 'string' && e.key ? e.key : typeof e.account === 'string' && e.account ? e.account : null;
-  return { label: name, left_pct: left, at, key };
+  const keys = Array.isArray(e.keys) ? e.keys.filter((k) => typeof k === 'string' && k) : null;
+  return { label: name, left_pct: left, at, resets_at, key, keys };
 }
 
 /**
@@ -50,13 +60,15 @@ function pickAltProfile(root, currentKey, currentLeft, nowSec) {
   if (!raw) return null;
   const entries = [];
   if (Array.isArray(raw)) for (const e of raw) entries.push(normalizeProfile(null, e));
-  else if (typeof raw === 'object' && Array.isArray(raw.profiles)) for (const e of raw.profiles) entries.push(normalizeProfile(null, e));
+  else if (raw && typeof raw === 'object' && Array.isArray(raw.profiles)) for (const e of raw.profiles) entries.push(normalizeProfile(null, e));
+  else if (raw && typeof raw === 'object' && raw.profiles && typeof raw.profiles === 'object') for (const [k, v] of Object.entries(raw.profiles)) entries.push(normalizeProfile(k, v)); // tokenroom real shape
   else if (typeof raw === 'object') for (const [k, v] of Object.entries(raw)) entries.push(normalizeProfile(k, v));
   let best = null;
   for (const p of entries) {
     if (!p) continue;
     if (nowSec - p.at > STALE_SEC) continue; // known-fresh only
-    if (currentKey && p.key && p.key === currentKey) continue; // that's us, not an alternative
+    if (p.resets_at != null && nowSec >= p.resets_at) continue; // post-reset reading is wrong-signed (readBudget crossedReset lesson) — don't trust the %
+    if (currentKey && ((p.key && p.key === currentKey) || (p.keys && p.keys.includes(currentKey)))) continue; // that's us (single key OR one of this profile's buckets)
     if (p.left_pct < 20) continue;
     if (currentLeft != null && p.left_pct <= currentLeft + 10) continue;
     if (!best || p.left_pct > best.left_pct) best = p;

@@ -199,6 +199,49 @@ test('budget below floor: no alt → allow stop (descent); fresh alt → keep bl
   assert.equal(stop(staleAlt).stdout, '');
 });
 
+test("alt profile parses tokenroom's REAL profiles.json shape (keys + last_windows_snapshot)", () => {
+  // The exact shape tokenroom writes (src/accounts.mjs) — written LITERALLY here so the
+  // contract is pinned independent of the test helper.
+  const h = homes();
+  writeKeyoku(h, { goals: [goal()], focus: focusFor(), obsLines: [obs()] });
+  writeTokenroom(h, { leftPct: 10 }); // thin → block reason carries the alt clause
+  mkdirSync(h.tokenroom, { recursive: true });
+  writeFileSync(
+    join(h.tokenroom, 'profiles.json'),
+    JSON.stringify({
+      profiles: {
+        work: {
+          keys: ['ph_abc'],
+          last_seen: nowSec() - 60,
+          last_windows_snapshot: { at: nowSec() - 60, five_hour: { used_pct: 15, resets_at: nowSec() + 3 * 3600 } },
+        },
+      },
+    })
+  );
+  const out = JSON.parse(stop(h).stdout);
+  assert.match(out.reason, /profile 'work' has ≈85% — finishing move here, then suggest the user switch/);
+});
+
+test('alt profile self-excludes the current session account by its keys[] bucket', () => {
+  const h = homes();
+  writeKeyoku(h, { goals: [goal()], focus: focusFor(), obsLines: [obs()] });
+  // The session is attributed to account bucket 'ph_me' (sessions.json + accounts/<key>).
+  mkdirSync(join(h.tokenroom, 'accounts', 'ph_me'), { recursive: true });
+  writeFileSync(join(h.tokenroom, 'sessions.json'), JSON.stringify({ s1: { key: 'ph_me', at: nowSec() - 30 } }));
+  writeFileSync(
+    join(h.tokenroom, 'accounts', 'ph_me', 'state.json'),
+    JSON.stringify({ updated_at: nowSec() - 30, windows: { five_hour: { used_pct: 90, resets_at: nowSec() + 3 * 3600 } } })
+  );
+  // The only profile OWNS bucket 'ph_me' → it is us, not an alternative → no switch advice.
+  writeFileSync(
+    join(h.tokenroom, 'profiles.json'),
+    JSON.stringify({ profiles: { me: { keys: ['ph_me'], last_seen: nowSec() - 30, last_windows_snapshot: { at: nowSec() - 30, five_hour: { used_pct: 10, resets_at: nowSec() + 3 * 3600 } } } } })
+  );
+  const out = JSON.parse(stop(h).stdout);
+  assert.equal(out.decision, 'block');
+  assert.doesNotMatch(out.reason, /profile '/);
+});
+
 test('tokenroom absent or stale → budget UNKNOWN → block WITHOUT a budget line (permissive for stop)', () => {
   const absent = homes();
   writeKeyoku(absent, { goals: [goal()], focus: focusFor(), obsLines: [obs()] });
