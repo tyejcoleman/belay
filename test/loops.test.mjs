@@ -395,6 +395,22 @@ test('loop disarm: focus grabbed by ANOTHER goal inside the spawn window → unf
   assert.equal(readLoopsFile(h).loops.goal_test1, undefined); // own arm state still cleared
 });
 
+test('loop create: FS failure during the arm write → {ok:false, step:arm} with completed steps reported, never a bare -32603 (L2-4)', () => {
+  const h = homes();
+  writeClaudeJson(h);
+  writeFileSync(h.belay, 'not a dir'); // BELAY_DIR is a FILE → every ~/.belay write throws
+  const out = JSON.parse(run(h, ['loop', 'create', '--objective', 'ship it', '--criteria', CRITERIA, '--session-id', 's1', '--cwd', '/tmp/proj']).stdout);
+  assert.equal(out.ok, false);
+  assert.equal(out.step, 'arm');
+  assert.deepEqual(out.steps.map((s) => s.step), ['create', 'focus']); // nothing hidden
+  assert.match(out.error, /created AND focused/);
+  assert.match(out.error, /Do not retry the whole create/);
+  // keyoku state really is live — the model repairs instead of duplicating the goal
+  const rows = readGoalsFile(h);
+  assert.equal(rows.length, 1);
+  assert.equal(JSON.parse(readFileSync(join(h.keyoku, 'focus.json'), 'utf8')).goalId, rows[0].id);
+});
+
 // ── ADR-14: loops are session-scoped by default ─────────────────────────────────────────
 
 test('loop create: SESSION-scoped by default (ADR-14) — no session_id and no scope → refused pre-spawn, keyoku untouched', () => {

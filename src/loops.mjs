@@ -202,58 +202,83 @@ export async function loopCreate(args = {}) {
 
   // 4 — arm: belay-local provenance + a fresh continuation budget (same semantics as
   // "focused goal changed" today) + proposal marked armed. ~/.belay writes only.
+  // EVERY write here is exception-guarded (refute L2-4): keyoku focus already succeeded,
+  // so an FS throw (ENOSPC/EACCES on ~/.belay) must never surface as a bare -32603 that
+  // hides the completed steps and invites a duplicate-goal retry (DESIGN §2.2 T2:
+  // "steps already completed are reported so the model can repair").
   const nowSec = now();
   const proposalId = typeof args.proposal_id === 'string' && args.proposal_id ? args.proposal_id : null;
-  const state = readLoops();
-  state.loops = pruneLoops(state.loops, readGoalRows(), nowSec);
-  state.loops[row.id] = {
-    armed: true,
-    paused: false,
-    armed_at: nowSec,
-    armed_by: proposalId ? `proposal:${sanitizeSlug(proposalId, 64)}` : 'model',
-    loop_scope: scope, // ADR-14 provenance: 'session' (pinned) | 'global' (explicit subtree hold)
-    session_id: sessionId,
-    cwd,
-    note: null,
-    paused_at: null,
-    proposal_id: proposalId,
-  };
-  writeLoopsState(state.loops);
+  try {
+    const state = readLoops();
+    state.loops = pruneLoops(state.loops, readGoalRows(), nowSec);
+    state.loops[row.id] = {
+      armed: true,
+      paused: false,
+      armed_at: nowSec,
+      armed_by: proposalId ? `proposal:${sanitizeSlug(proposalId, 64)}` : 'model',
+      loop_scope: scope, // ADR-14 provenance: 'session' (pinned) | 'global' (explicit subtree hold)
+      session_id: sessionId,
+      cwd,
+      note: null,
+      paused_at: null,
+      proposal_id: proposalId,
+    };
+    writeLoopsState(state.loops);
+  } catch (e) {
+    return fail(
+      'arm',
+      `loops.json write failed (${sanitizeText(e?.message ?? String(e), 160)}) — the goal was created AND focused (see steps): the Stop hold and fall-arrest are LIVE. Do not retry the whole create (that would duplicate the goal); free ~/.belay and re-arm with belay_loop_create({goal:'${sanitizeSlug(String(row.id), 40)}',…}), or stand down via belay_loop_disarm`
+    );
+  }
 
   // Fresh-copy per-entry RMW (L1-1) — never write a stale whole-map snapshot back.
   // Reset scope (ADR-15, DESIGN §2.2 step 4's "this (session_id ?? focus-scope, goalId)
   // entry"): a session-scoped arm refunds ONLY the arming session's budget — never a
   // sibling's spent counters; a global arm refunds the focus-scope entries (every session
   // driving this goal), the "focused goal changed" fresh-budget semantics.
-  mutateOwnState((own) => {
-    let dirty = false;
-    if (sessionId) {
-      own.sessions[sessionId] = { goalId: row.id, continuations: 0, staleBlocked: false, updated_at: nowSec };
-      dirty = true;
-    } else {
-      for (const [sid, e] of Object.entries(own.sessions)) {
-        if (e && typeof e === 'object' && e.goalId === row.id) {
-          own.sessions[sid] = { ...e, continuations: 0, staleBlocked: false };
-          dirty = true;
+  let countersReset = true;
+  try {
+    mutateOwnState((own) => {
+      let dirty = false;
+      if (sessionId) {
+        own.sessions[sessionId] = { goalId: row.id, continuations: 0, staleBlocked: false, updated_at: nowSec };
+        dirty = true;
+      } else {
+        for (const [sid, e] of Object.entries(own.sessions)) {
+          if (e && typeof e === 'object' && e.goalId === row.id) {
+            own.sessions[sid] = { ...e, continuations: 0, staleBlocked: false };
+            dirty = true;
+          }
         }
       }
-    }
-    return dirty;
-  });
+      return dirty;
+    });
+  } catch {
+    countersReset = false; // armed-but-degraded: the loop is live, the fresh budget didn't land
+  }
 
   let proposalMarked = false;
   if (proposalId) {
-    const pPath = join(belayDir(), 'proposals.json');
-    const p = readJSON(pPath);
-    const hit = p && Array.isArray(p.proposals) ? p.proposals.find((x) => x && x.id === proposalId) : null;
-    if (hit) {
-      hit.status = 'armed';
-      ensureDir(belayDir());
-      atomicWriteJSON(pPath, p);
-      proposalMarked = true;
+    try {
+      const pPath = join(belayDir(), 'proposals.json');
+      const p = readJSON(pPath);
+      const hit = p && Array.isArray(p.proposals) ? p.proposals.find((x) => x && x.id === proposalId) : null;
+      if (hit) {
+        hit.status = 'armed';
+        ensureDir(belayDir());
+        atomicWriteJSON(pPath, p);
+        proposalMarked = true;
+      }
+    } catch {
+      /* armed-but-degraded: provenance bookkeeping only — reported below */
     }
   }
-  steps.push({ step: 'arm', ok: true, ...(proposalId ? { proposal_id: proposalId, proposal_marked: proposalMarked } : {}) });
+  steps.push({
+    step: 'arm',
+    ok: true,
+    ...(countersReset ? {} : { counters_reset: false, degraded: 'state.json write failed — continuation counters were NOT reset; the loop is still live' }),
+    ...(proposalId ? { proposal_id: proposalId, proposal_marked: proposalMarked } : {}),
+  });
 
   // 5 — report: the same composition belay_status returns (best-effort — a compose
   // failure must not unwind an already-armed loop; the loop IS live).
