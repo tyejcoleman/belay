@@ -28,28 +28,35 @@ test('TOOLS: exactly the 7 designed tools, valid frozen JSON schemas', async () 
   assert.equal(SERVER_INFO.name, 'belay');
 });
 
-// ── Stub signatures exist and throw NotImplemented (frozen interfaces) ─────────────────
+// ── Frozen interfaces: every round-0 signature is exported and implemented ─────────────
+// (Round 0 asserted these all threw ERR_NOT_IMPLEMENTED; at integrate the same frozen
+// names must exist as real functions — behavior is covered by each module's own suite.)
 
-test('round-0 stubs: frozen signatures exported, all throw ERR_NOT_IMPLEMENTED', async () => {
-  const ni = { code: 'ERR_NOT_IMPLEMENTED' };
+test('frozen signatures: every round-0 contract export exists as a function (stubs gone)', async () => {
   const mcp = await import('../src/mcp.mjs');
   const compose = await import('../src/compose.mjs');
   const kc = await import('../src/keyoku-client.mjs');
   const loops = await import('../src/loops.mjs');
   const propose = await import('../src/propose.mjs');
   const ss = await import('../src/session-start.mjs');
-  await assert.rejects(mcp.mcpServe(), ni);
-  assert.throws(() => compose.buildStatus({}), ni);
-  assert.throws(() => compose.buildLoopList(), ni);
-  assert.throws(() => kc.resolveKeyokuServer(), ni);
-  await assert.rejects(kc.keyokuSession(), ni);
-  await assert.rejects(loops.loopCreate({ objective: 'x', criteria: [] }), ni);
-  assert.throws(() => loops.loopPause({ goal: 'g' }), ni);
-  assert.throws(() => loops.loopResume({ goal: 'g' }), ni);
-  await assert.rejects(loops.loopDisarm({ goal: 'g' }), ni);
-  assert.throws(() => propose.scan(), ni);
-  assert.throws(() => propose.dismiss('p1'), ni);
-  await assert.rejects(ss.hookSessionStart(), ni);
+  for (const [mod, name] of [
+    [mcp, 'mcpServe'],
+    [compose, 'buildStatus'],
+    [compose, 'buildLoopList'],
+    [kc, 'resolveKeyokuServer'],
+    [kc, 'keyokuSession'],
+    [loops, 'loopCreate'],
+    [loops, 'loopPause'],
+    [loops, 'loopResume'],
+    [loops, 'loopDisarm'],
+    [loops, 'readLoops'],
+    [propose, 'scan'],
+    [propose, 'dismiss'],
+    [ss, 'hookSessionStart'],
+  ]) {
+    assert.equal(typeof mod[name], 'function', `${name} is exported and implemented`);
+    assert.ok(!/ERR_NOT_IMPLEMENTED/.test(String(mod[name])), `${name} is no longer a round-0 stub`);
+  }
 });
 
 test('loops.readLoops: implemented round 0 — absent/malformed degrades to {loops:{}}', async () => {
@@ -71,14 +78,21 @@ test('loops.readLoops: implemented round 0 — absent/malformed degrades to {loo
   }
 });
 
-// ── bin dispatch: complete now; stubs fail loudly on CLI, hooks stay silent ────────────
+// ── bin dispatch: every verb reaches its implemented handler (stub era over) ───────────
 
-test('bin: new verbs dispatch to the stub modules (loud NotImplemented, nonzero exit)', () => {
+test('bin: new verbs dispatch to the implemented handlers (exit 0, JSON out, no stub trace)', () => {
   const h = homes();
-  for (const args of [['mcp'], ['loop', 'list'], ['loop', 'pause', 'g1'], ['loop', 'resume', 'g1'], ['loop', 'disarm', 'g1'], ['loop', 'create', '--objective', 'x', '--criteria', '[]'], ['propose'], ['propose', '--dismiss', 'p1']]) {
+  // `belay mcp` serves stdio and shuts down clean when stdin ends (run() closes it).
+  const mcp = run(h, ['mcp'], '');
+  assert.equal(mcp.status, 0, 'belay mcp exits clean on stdin end');
+  assert.doesNotMatch(mcp.stderr, /not implemented/i);
+  // JSON-printing verbs: each answers from the real handler (refusals are ok:false
+  // RESULTS, not crashes — hermetic homes have no goals and no registered keyoku).
+  for (const args of [['loop', 'list'], ['loop', 'pause', 'g1'], ['loop', 'resume', 'g1'], ['loop', 'disarm', 'g1'], ['loop', 'create', '--objective', 'x', '--criteria', '[]'], ['propose'], ['propose', '--dismiss', 'p1']]) {
     const r = run(h, args);
-    assert.notEqual(r.status, 0, `belay ${args.join(' ')} exits nonzero while stubbed`);
-    assert.match(r.stderr, /not implemented/i, `belay ${args.join(' ')} names the stub`);
+    assert.equal(r.status, 0, `belay ${args.join(' ')} exits 0 (got stderr: ${r.stderr.slice(0, 200)})`);
+    assert.doesNotMatch(r.stderr, /not implemented/i, `belay ${args.join(' ')} reaches the implementation`);
+    assert.doesNotThrow(() => JSON.parse(r.stdout), `belay ${args.join(' ')} prints JSON`);
   }
 });
 
@@ -96,7 +110,7 @@ test('bin: `belay loop create` rejects malformed --criteria JSON before touching
   assert.match(r.stderr, /must be valid JSON/);
 });
 
-test('bin: hook session-start degrades to silent exit 0 while stubbed (never-crash rule)', () => {
+test('bin: hook session-start with zero proposals is silent exit 0 (never-crash rule)', () => {
   const h = homes();
   const r = run(h, ['hook', 'session-start'], {});
   assert.equal(r.status, 0);
