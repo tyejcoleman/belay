@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { homes, run, env, writeLoops, writeProposals, writeResume, writeRipe, writeClaudeJson, fakeKeyokuSession, nowSec } from './helpers.mjs';
+import { homes, run, writeLoops, writeProposals, writeResume, writeRipe, writeClaudeJson, fakeKeyokuSession, nowSec } from './helpers.mjs';
 
 // Round-0 scaffold gates (docs/DESIGN.md §6.0): the FROZEN contracts every fill agent
 // codes against — tool schemas, bin dispatch, stub signatures, fixture server, helpers.

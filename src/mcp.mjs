@@ -153,11 +153,10 @@ async function dispatch(name, args) {
 
 /**
  * Serve MCP over stdio until stdin ends. Never throws once serving (per-request
- * try/catch → JSON-RPC error); resolves on shutdown.
- * @param {string[]} [argv] raw CLI args after the verb (reserved; no flags in v1)
+ * try/catch → JSON-RPC error); resolves on shutdown. Takes no flags in v1.
  * @returns {Promise<void>}
  */
-export async function mcpServe(argv = []) { // eslint-disable-line no-unused-vars
+export async function mcpServe() {
   const send = (msg) => process.stdout.write(JSON.stringify(msg) + '\n');
   const rl = createInterface({ input: process.stdin });
 

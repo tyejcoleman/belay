@@ -49,7 +49,7 @@ switch (cmd) {
   }
   case 'mcp':
     // stdio MCP server (docs/DESIGN.md §2) — registered via `claude mcp add … belay mcp`.
-    await (await import('../src/mcp.mjs')).mcpServe(argv);
+    await (await import('../src/mcp.mjs')).mcpServe();
     break;
   case 'loop': {
     const sub = argv[0];

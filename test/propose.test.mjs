@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { homes, run, goal, focusFor, obs, writeKeyoku, writeTokenroom, writeLoops, writeResume, writeRipe, nowSec, iso } from './helpers.mjs';
+import { homes, run, goal, focusFor, obs, writeKeyoku, writeTokenroom, writeLoops, writeRipe, nowSec, iso } from './helpers.mjs';
 
 // T1: propose.scan() truth table (DESIGN §4.1/§6.2) — each S1–S5 predicate on synthetic
 // homes, ready/not-ready boundaries, content-hash id stability, sticky dismissal,

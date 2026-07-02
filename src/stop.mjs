@@ -40,7 +40,10 @@ export function budgetLine(b, cfg) {
  * goal exists), so the hook and compose.mjs's 5-arg call return the same verdict.
  * Absent/malformed loops.json → {} → today's decision table exactly (ADR-4).
  */
-export function decideStop(p, k, budget, cfg, entry, nowSec = Date.now() / 1000, loops = null) {
+export function decideStop(_p, k, budget, cfg, entry, nowSec = Date.now() / 1000, loops = null) {
+  // `_p` (the stop payload) is deliberately unconsulted since ADR-6 dropped the
+  // stop_hook_active branch — kept first-positional for signature stability (hook,
+  // compose.mjs, status.mjs and the tests all pass it).
   // ADR-6: we no longer blanket-allow on Claude Code's stop_hook_active guard — that
   // capped the loop at ONE forced continuation per turn (making max_continuations
   // unreachable) and let the one-shot stale-block consume it. We deliberately do NOT reset
