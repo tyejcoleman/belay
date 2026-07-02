@@ -54,19 +54,52 @@ test('resolveKeyokuServer: registered spec returned verbatim ({command,args,env}
   });
 });
 
-test('resolveKeyokuServer: per-project mcpServers blocks are searched too (same walk as stack.mjs)', async () => {
+test('resolveKeyokuServer: SCOPE-ORDERED (L2-2) — current project block beats user scope; other projects are never spawned', async () => {
   const h = homes();
   mkdirSync(h.config, { recursive: true });
   const cjPath = join(h.config, '.claude.json');
+  const spec = (marker) => ({ type: 'stdio', command: 'node', args: [marker], env: {} });
+
+  // duplicate registration: THIS project's block (an ancestor of process.cwd()) + user scope
   writeFileSync(
     cjPath,
-    JSON.stringify({ projects: { '/some/proj': { mcpServers: { keyoku: { type: 'stdio', command: 'node', args: ['/x/dist/index.js'], env: {} } } } } })
+    JSON.stringify({
+      mcpServers: { keyoku: spec('/user/dist/index.js') },
+      projects: {
+        [process.cwd()]: { mcpServers: { keyoku: spec('/local/dist/index.js') } },
+        '/some/other-project': { mcpServers: { 'keyoku-fork': spec('/other/run.sh') } },
+      },
+    })
   );
   await withEnv(hermetic(h), () => {
     const r = resolveKeyokuServer();
     assert.equal(r.ok, true);
-    assert.equal(r.command, 'node');
-    assert.deepEqual(r.args, ['/x/dist/index.js']);
+    assert.deepEqual(r.args, ['/local/dist/index.js']); // local wins — same precedence Claude Code applies
+  });
+
+  // no local block → user scope; the OTHER project's /keyoku/i entry must never win
+  writeFileSync(
+    cjPath,
+    JSON.stringify({
+      mcpServers: { keyoku: spec('/user/dist/index.js') },
+      projects: { '/some/other-project': { mcpServers: { 'keyoku-fork': spec('/other/run.sh') } } },
+    })
+  );
+  await withEnv(hermetic(h), () => {
+    assert.deepEqual(resolveKeyokuServer().args, ['/user/dist/index.js']);
+  });
+
+  // ONLY the other project's entry exists → not registered here (its command was
+  // consented to in that project's context only)
+  writeFileSync(cjPath, JSON.stringify({ projects: { '/some/other-project': { mcpServers: { 'keyoku-fork': spec('/other/run.sh') } } } }));
+  await withEnv(hermetic(h), () => {
+    assert.equal(resolveKeyokuServer().ok, false);
+  });
+
+  // within one scope, an entry named exactly 'keyoku' beats a substring cousin
+  writeFileSync(cjPath, JSON.stringify({ mcpServers: { 'keyoku-staging': spec('/staging/index.js'), keyoku: spec('/user/dist/index.js') } }));
+  await withEnv(hermetic(h), () => {
+    assert.deepEqual(resolveKeyokuServer().args, ['/user/dist/index.js']);
   });
 });
 

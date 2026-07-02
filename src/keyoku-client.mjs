@@ -30,34 +30,50 @@ import { claudeJsonPath } from './stack.mjs';
 //   way Claude Code resolves it when IT spawns the server) — no where/which probing needed
 //   because we never guess a binary, we replay the registration verbatim.
 
-/** The mcpServers walk stack.mjs uses internally (allMcpServers is module-private there;
- *  same claudeJsonPath, same top-level + per-project descent — keep the two in step). */
-function registeredMcpServers() {
+/** SCOPE-ORDERED mcpServers groups (refute L2-2): the CURRENT project's blocks first
+ *  (deepest matching `projects` key — exact cwd, then ancestors), then the user scope
+ *  (top-level mcpServers). Other projects' blocks are NEVER walked: a command registered
+ *  for /x/experiments was consented to in that project's context only, and duplicate
+ *  registrations must resolve the way Claude Code itself resolves them (local wins over
+ *  user) — the old flat walk inverted that and could spawn another project's server. */
+function scopedMcpServerGroups(cwd = process.cwd()) {
   const cj = readJSON(claudeJsonPath());
-  const servers = [];
+  const groups = [];
   if (cj && typeof cj === 'object') {
-    if (cj.mcpServers && typeof cj.mcpServers === 'object') servers.push(...Object.entries(cj.mcpServers));
-    if (cj.projects && typeof cj.projects === 'object') {
-      for (const p of Object.values(cj.projects)) {
-        if (p && typeof p === 'object' && p.mcpServers && typeof p.mcpServers === 'object') servers.push(...Object.entries(p.mcpServers));
-      }
+    const norm = (p) => (typeof p === 'string' ? p.replace(/\/+$/, '') : '');
+    const here = norm(cwd);
+    if (here && cj.projects && typeof cj.projects === 'object') {
+      const blocks = Object.entries(cj.projects)
+        .filter(([dir, p]) => {
+          const d = norm(dir);
+          return d && p && typeof p === 'object' && p.mcpServers && typeof p.mcpServers === 'object' && (here === d || here.startsWith(d + '/'));
+        })
+        .sort((a, b) => norm(b[0]).length - norm(a[0]).length); // most specific project first
+      for (const [, p] of blocks) groups.push(Object.entries(p.mcpServers));
     }
+    if (cj.mcpServers && typeof cj.mcpServers === 'object') groups.push(Object.entries(cj.mcpServers));
   }
-  return servers;
+  return groups;
 }
+
+const usableSpec = (s) => !!(s && typeof s === 'object' && typeof s.command === 'string' && s.command);
 
 /**
  * Resolve the registered keyoku MCP server spec — read-only, never throws.
+ * Scope order per L2-2 (current project → user scope, never other projects); within a
+ * scope an entry named exactly `keyoku` beats a substring cousin (`keyoku-staging`).
  * @returns {{ ok: true, command: string, args: string[], env: object, source: string }
  *          | { ok: false, error: string }}
  */
 export function resolveKeyokuServer() {
-  for (const [name, s] of registeredMcpServers()) {
-    if (!/keyoku/i.test(name)) continue;
-    if (!s || typeof s !== 'object' || typeof s.command !== 'string' || !s.command) continue;
+  for (const group of scopedMcpServerGroups()) {
+    const exact = group.find(([name, s]) => name === 'keyoku' && usableSpec(s));
+    const hit = exact ?? group.find(([name, s]) => /keyoku/i.test(name) && usableSpec(s));
+    if (!hit) continue;
+    const s = hit[1];
     return {
       ok: true,
-      command: s.command, // verbatim — this is the exact process Claude Code itself speaks to
+      command: s.command, // verbatim — the exact process Claude Code itself speaks to in THIS scope
       args: Array.isArray(s.args) ? s.args.filter((a) => typeof a === 'string') : [],
       env: s.env && typeof s.env === 'object' && !Array.isArray(s.env) ? s.env : {},
       source: claudeJsonPath(),
