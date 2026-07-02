@@ -119,7 +119,7 @@ Source: `goals.json` (rows: status/autonomy/lastAssessedAt/convergedAt) × `focu
   "description": "Pause the Stop-hook hold for one goal's loop (the session may stop freely). The PreToolUse fall-arrest stays ACTIVE while the goal remains focused — pausing the rope never pauses the arrest. State is belay-local; keyoku is untouched.",
   "inputSchema": { "type": "object", "properties": { "goal": { "type": "string" }, "note": { "type": "string" } }, "required": ["goal"], "additionalProperties": false } }
 { "name": "belay_loop_resume",
-  "description": "Resume a paused loop. Clears the pause flag and the one-shot stale-block spend so the first stop re-demands fresh ground truth (goal_assess).",
+  "description": "Resume a paused loop. Clears the pause flag and the one-shot stale-block spend so the first stop re-demands fresh ground truth (goal_assess). Refused when the loop is not paused — each pause→resume cycle refunds at most one stale-block (ADR-15).",
   "inputSchema": { "type": "object", "properties": { "goal": { "type": "string" } }, "required": ["goal"], "additionalProperties": false } }
 { "name": "belay_loop_disarm",
   "description": "Fully stand down a loop: unfocus the goal via keyoku's own process (goal_unfocus) and clear belay's arm metadata. With no focused autonomous goal, both the Stop hold and the PreToolUse gate deactivate (belay returns to no-op).",
@@ -298,7 +298,7 @@ No file appears in two rows. `mcp.mjs`→handlers boundary: A owns the server fi
 
 **T3 — live-surface check (user-run, documented not CI):** `belay doctor` green on the real machine; one real `belay_loop_create` against live keyoku on a toy goal (`echo`-probe), one Stop-block observed in a live session, then disarm.
 
-**T4 — adversarial refute (independent pass, read-only):** attack ADR-6 termination with pause/resume/disarm interleavings (must stay ≤ max_continuations+1 blocks per pair); attempt gate bypass via loop machinery (must be impossible by construction — no code path from loops.json to `decideGate`); prompt-injection via proposal summaries/ripe suggestions/keyoku child stderr; torn/concurrent loops.json + goals.json writes; two-account ambiguity in `belay_status`; fake-keyoku vs real-keyoku contract diff (fixture drift — compare fake's write shapes against `store.ts`).
+**T4 — adversarial refute (independent pass, read-only):** attack ADR-6 termination with pause/resume/disarm interleavings (bound per ADR-15: ≤ max_continuations + 1 + one per explicit pause→resume cycle for the pair; with NO belay MCP calls the plain max_continuations+1 bound must hold; resume on an unpaused loop must be refused); attempt gate bypass via loop machinery (must be impossible by construction — no code path from loops.json to `decideGate`); prompt-injection via proposal summaries/ripe suggestions/keyoku child stderr; torn/concurrent loops.json + goals.json writes; two-account ambiguity in `belay_status`; fake-keyoku vs real-keyoku contract diff (fixture drift — compare fake's write shapes against `store.ts`).
 
 Convergence = T0–T2 all executing and green + T4 refute pass agrees + doctor/status render on live state without error.
 

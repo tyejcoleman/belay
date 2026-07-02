@@ -113,6 +113,42 @@ test('loopResume: clears the pause AND refunds staleBlocked for THIS goal’s se
   assert.equal(st.sessions.s2.staleBlocked, true); // other goals untouched
 });
 
+test('loopResume: UNPAUSED loop → refused (ADR-15) — the stale-block refund is never a free mint', async () => {
+  const h = homes();
+  writeKeyoku(h, { goals: [goal()] });
+  writeLoops(h, { goal_test1: { paused: false } }); // armed, not paused
+  mkdirSync(h.belay, { recursive: true });
+  writeFileSync(join(h.belay, 'state.json'), JSON.stringify({ sessions: { s1: { goalId: 'goal_test1', continuations: 25, staleBlocked: true, updated_at: nowSec() } } }));
+  await withEnv(worldEnv(h), () => {
+    const r = loopResume({ goal: 'ship-widget' });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /not paused/);
+  });
+  // the spent one-shot stays spent — the L1-3 repro (bare resume mints block #27) is closed
+  const st = JSON.parse(readFileSync(join(h.belay, 'state.json'), 'utf8'));
+  assert.equal(st.sessions.s1.staleBlocked, true);
+});
+
+test('loop create (session-scoped): resets ONLY the arming session\'s counters — a sibling\'s spent budget is never refunded (ADR-15)', () => {
+  const h = homes();
+  writeClaudeJson(h);
+  mkdirSync(h.belay, { recursive: true });
+  const out1 = JSON.parse(run(h, ['loop', 'create', '--objective', 'first', '--criteria', CRITERIA, '--session-id', 'sib', '--cwd', '/tmp/proj']).stdout);
+  assert.equal(out1.ok, true);
+  // sibling sib has SPENT its budget on this goal
+  writeFileSync(
+    join(h.belay, 'state.json'),
+    JSON.stringify({ sessions: { sib: { goalId: out1.goal.id, continuations: 25, staleBlocked: true, updated_at: nowSec() } } })
+  );
+  // s1 re-arms the SAME goal session-scoped → sib's spend must survive
+  const out2 = JSON.parse(run(h, ['loop', 'create', '--goal', out1.goal.id, '--session-id', 's1', '--cwd', '/tmp/proj']).stdout);
+  assert.equal(out2.ok, true, JSON.stringify(out2));
+  const st = JSON.parse(readFileSync(join(h.belay, 'state.json'), 'utf8'));
+  assert.equal(st.sessions.sib.continuations, 25); // not refunded by someone else's arm
+  assert.equal(st.sessions.sib.staleBlocked, true);
+  assert.deepEqual({ c: st.sessions.s1.continuations, b: st.sessions.s1.staleBlocked }, { c: 0, b: false }); // own fresh budget
+});
+
 test('loopResume: no loop entry → { ok:false } (nothing to resume)', async () => {
   const h = homes();
   writeKeyoku(h, { goals: [goal()] });

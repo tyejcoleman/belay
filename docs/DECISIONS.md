@@ -128,7 +128,9 @@ the per-stop process spawns. Consider the stops for this pair in order:
    `stop_hook_active` flag.
 2. **Stale block** and **unmet-unknown block** (ADR-7) are one-shot: each sets
    `staleBlocked = true` and persists it; with the flag already set the decision is `allow`
-   (`stale-spent` / `unmet-unknown-spent`). So these fire **at most once, total, for the pair**.
+   (`stale-spent` / `unmet-unknown-spent`). So these fire **at most once, total, for the
+   pair** — per explicit refund: `belay_loop_resume` refunds the flag (ADR-12) but is only
+   accepted on a PAUSED loop, so each pause→resume cycle adds at most one (ADR-15).
 3. Every other branch is an unconditional `allow` (absent / paused / no-focus /
    scope-mismatch / goal-missing / converged / non-active / non-autonomous /
    iterations-exhausted / budget-floor / nothing-unmet).
@@ -331,6 +333,31 @@ cannot discover the caller's session id (ADR-9: MCP calls carry no session id); 
 CAN — it is in every hook payload and the transcript path. The refusal text teaches
 exactly that. The old description text ("scoped to this session/cwd") claimed a pin that
 by default never happened; the description now says what the tool actually does.
+
+## ADR-15 — counter semantics under the loop lifecycle: refunds only by explicit, paired calls
+
+**Decision:** Three rules reconcile the loop lifecycle with the ADR-6 termination bound:
+(1) `belay_loop_resume` is REFUSED unless the loop is currently paused — the ADR-12
+stale-block refund therefore requires a `pause` first, and each pause→resume cycle can
+add at most ONE extra block for a `(session, goal)` pair. (2) A session-scoped
+`belay_loop_create` (the ADR-14 default) resets ONLY the arming session's counter entry —
+never a sibling session's spent budget; an explicit `scope:'global'` arm resets the
+focus-scope entries (every session driving the goal), which is DESIGN §2.2 step 4's
+"focused goal changed = fresh budget" semantics. (3) The honest composite bound, stated
+in DESIGN §6.2 T4: for any stop sequence, blocks per `(session, goal)` ≤
+`max_continuations + 1 + (number of explicit pause→resume cycles) `, and with **no belay
+MCP calls at all** the plain ADR-6 `max_continuations + 1` bound holds unchanged.
+
+**Why:** Refute L1-3 proved the old T4 criterion ("must stay ≤ max_continuations+1 under
+pause/resume interleavings") unsatisfiable against the mandated ADR-12 behavior: resume
+refunded `staleBlocked` for every session even on an UNPAUSED loop (a free, repeatable
+mint — one extra block per bare resume call), and re-arm zeroed every session's counters
+(refunding a stranger's fully-spent budget). Every excess block still required an
+explicit MCP call — pause itself releases the hold, so no involuntary wedge existed — but
+the documentation claimed a bound the code could not meet. Rather than drop the ADR-12
+refund (resuming onto stale truth un-assessed is worse), the refund is kept and made
+expensive-and-paired, the reset is scoped to what the caller actually armed, and the
+stated bound now tells the truth.
 
 ## Non-ADR notes
 

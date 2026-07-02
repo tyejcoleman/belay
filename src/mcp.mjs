@@ -101,7 +101,7 @@ export const TOOLS = [
   {
     name: 'belay_loop_resume',
     description:
-      'Resume a paused loop. Clears the pause flag and the one-shot stale-block spend so the first stop re-demands fresh ground truth (goal_assess).',
+      'Resume a paused loop. Clears the pause flag and the one-shot stale-block spend so the first stop re-demands fresh ground truth (goal_assess). Refused when the loop is not paused — each pause→resume cycle refunds at most one stale-block (ADR-15).',
     inputSchema: { type: 'object', properties: { goal: { type: 'string' } }, required: ['goal'], additionalProperties: false },
   },
   {

@@ -221,17 +221,22 @@ export async function loopCreate(args = {}) {
   writeLoopsState(state.loops);
 
   // Fresh-copy per-entry RMW (L1-1) — never write a stale whole-map snapshot back.
+  // Reset scope (ADR-15, DESIGN §2.2 step 4's "this (session_id ?? focus-scope, goalId)
+  // entry"): a session-scoped arm refunds ONLY the arming session's budget — never a
+  // sibling's spent counters; a global arm refunds the focus-scope entries (every session
+  // driving this goal), the "focused goal changed" fresh-budget semantics.
   mutateOwnState((own) => {
     let dirty = false;
-    for (const [sid, e] of Object.entries(own.sessions)) {
-      if (e && typeof e === 'object' && e.goalId === row.id) {
-        own.sessions[sid] = { ...e, continuations: 0, staleBlocked: false };
-        dirty = true;
-      }
-    }
     if (sessionId) {
       own.sessions[sessionId] = { goalId: row.id, continuations: 0, staleBlocked: false, updated_at: nowSec };
       dirty = true;
+    } else {
+      for (const [sid, e] of Object.entries(own.sessions)) {
+        if (e && typeof e === 'object' && e.goalId === row.id) {
+          own.sessions[sid] = { ...e, continuations: 0, staleBlocked: false };
+          dirty = true;
+        }
+      }
     }
     return dirty;
   });
@@ -302,6 +307,9 @@ export function loopPause({ goal, note } = {}) {
  * belay_loop_resume — clear the pause flag AND set staleBlocked:false on matching
  * state.json session entries, so the first stop re-demands fresh ground truth
  * (goal_assess) — never resumes onto stale truth. Writes belay files only.
+ * REFUSED when the loop is not paused (ADR-15): the stale-block refund is otherwise a
+ * free mint — each pause→resume cycle may refund at most ONE extra block, keeping the
+ * ADR-6 bound at max_continuations + 1 + one per explicit cycle.
  * @param {{ goal: string }} args
  * @returns {object} { ok:true, goalId, paused:false } | { ok:false, error }
  */
@@ -312,6 +320,7 @@ export function loopResume({ goal } = {}) {
   const state = readLoops();
   const e = state.loops[goalId];
   if (!e) return refuse(`no loop state for goal '${sanitizeSlug(goal)}' — nothing to resume`);
+  if (e.paused !== true) return refuse(`loop for goal '${sanitizeSlug(goal)}' is not paused — nothing to resume (resume refunds the one-shot stale-block, so it only follows a pause; ADR-15)`);
   state.loops = pruneLoops(state.loops, goals);
   e.paused = false;
   e.paused_at = null;
