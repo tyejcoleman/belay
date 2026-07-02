@@ -26,7 +26,7 @@ import { loopCreate, loopPause, loopResume, loopDisarm } from './loops.mjs';
 import { scan, dismiss } from './propose.mjs';
 
 export const PROTOCOL_VERSION = '2025-06-18';
-export const SERVER_INFO = { name: 'belay', version: '0.1.0' };
+export const SERVER_INFO = { name: 'belay', version: '0.2.0' }; // kept in lockstep with package.json (scaffold test asserts it)
 
 /** The 7-tool surface — schemas are the DESIGN.md §2.2 contract, verbatim. FROZEN. */
 export const TOOLS = [

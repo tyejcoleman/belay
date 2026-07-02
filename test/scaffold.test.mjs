@@ -26,6 +26,9 @@ test('TOOLS: exactly the 7 designed tools, valid frozen JSON schemas', async () 
   }
   assert.equal(PROTOCOL_VERSION, '2025-06-18');
   assert.equal(SERVER_INFO.name, 'belay');
+  // release-identity drift gate (refute-audit F4): the served version IS the shipped version
+  const pkg = JSON.parse(readFileSync(join(import.meta.dirname ?? new URL('.', import.meta.url).pathname, '..', 'package.json'), 'utf8'));
+  assert.equal(SERVER_INFO.version, pkg.version);
 });
 
 // ── Frozen interfaces: every round-0 signature is exported and implemented ─────────────

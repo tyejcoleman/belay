@@ -8,7 +8,84 @@
 > feeds rope, the PreToolUse gate is the fall-arrest. **Entries below this line predate the
 > rename and name the tool "conductor"; they are kept verbatim as accurate history.**
 
-## Unreleased — renamed to belay + one-command bundle + autonomous e2e proof
+## 0.2.0 — 2026-07-02
+
+The SOTA meta-harness release: belay becomes MCP-accessible, creates and runs autonomous
+convergence loops through keyoku's own process, and proposes loops from live state
+signals — then survived a 23-agent adversarial refute (13 confirmed findings + 4 audit
+findings), every one fixed below with a regression test.
+
+### The SOTA surface (ADR-9..12)
+
+- **`belay mcp`** — hand-rolled newline-stdio JSON-RPC 2.0 MCP server (zero deps,
+  tokenroom pattern), registered by `belay install` via `claude mcp add`. Seven tools:
+  `belay_status` (stack × budget × goal × loop × counters × the would-block verdict, every
+  figure file-sourced), `belay_loop_create` (objective → created → focused → armed in one
+  confirmed call, all keyoku writes through keyoku's own registered server process —
+  ADR-10), `belay_loop_list`, `belay_loop_pause`/`resume`/`disarm` (pause suspends the
+  rope, never the fall-arrest — ADR-12), and `belay_propose` (S1–S5 signals: deferred work
+  ready, unfocused autonomous goals, stale-converged, budget-reset, keyoku-ripe — advisory
+  only, never auto-armed — ADR-11).
+- **SessionStart briefing** — open proposals surfaced as `additionalContext` (sanitized,
+  byte-capped ≤1.5KB), zero proposals → zero output.
+- **CLI twins** — `belay loop create|list|pause|resume|disarm`, `belay propose`; CLI and
+  MCP render from the same compose/handler layer so they cannot drift. `belay status` and
+  `belay doctor` show loop arm/pause state, proposal counts, and the loops/proposals
+  self-checks.
+
+### Refute-round hardening (all 17 findings fixed, each with a fail-before/pass-after test)
+
+- **bypassPermissions escalates ask → deny (ADR-13, live TEST-A finding):** under
+  `defaultMode: bypassPermissions` the harness auto-resolves "ask" — the fall-arrest was a
+  silent no-op. While an autonomous goal is focused, would-be asks now DENY with
+  instructions (run outside bypass, or `belay_loop_disarm`); doctor warns on the setting.
+- **Loops are session-scoped by default (ADR-14, live conscription incident):**
+  `belay_loop_create` requires `session_id` (pinned in `goal_focus`) unless
+  `scope:'global'` is explicitly passed; `loop_scope` recorded as provenance; the tool
+  description now says what the tool actually does.
+- **Child stderr withheld from MCP-visible errors (L2-3):** a crashing keyoku child that
+  echoes its registered env (API keys) can no longer leak it into the model-visible
+  transcript — transport errors carry only belay-authored text, stderr is drained and
+  never kept, logged, or surfaced.
+- **Budget attribution can never serve another account's numbers (L4-1):** `readBudget`
+  mirrors tokenroom's quotaScope — an unmapped session on a ≥2-account machine gets
+  quota WITHHELD (UNKNOWN, permissive for stops, no spawn gating) instead of the
+  last-writer-wins top-level pointer.
+- **`belay_status` never fabricates (L4-2):** with no `session_id` and no session-pinned
+  focus, counters come back `unattributed` (withheld) and the verdict is explicitly
+  marked zero-history — never a phantom `0/25` + opposite verdict.
+- **Disarm cannot blind-clear a concurrent arm's focus (L2-1):** the focused-goal match is
+  re-read after the keyoku child spawn, immediately before the argument-less
+  `goal_unfocus` RPC.
+- **ADR-6 termination bound hardened (L1-1/L1-2/L1-3, ADR-15):** state.json writes are
+  per-entry read-modify-write over the freshest copy (a concurrent stop can no longer
+  revert a just-persisted counter); a fresh `lastAssessedAt` attesting an OLDER
+  observation tail blocks once demanding `goal_assess` instead of releasing on stale
+  ground truth; `belay_loop_resume` is refused unless paused (one stale-block refund per
+  explicit pause→resume cycle) and a session-scoped re-arm resets only the arming
+  session's counters.
+- **Scope-ordered keyoku server resolution (L2-2):** current project block first, then
+  user scope — never another project's `/keyoku/i`-named command; exact name beats
+  substring within a scope.
+- **Post-arm writes guarded (L2-4):** an FS failure after keyoku focus succeeded returns
+  `{ok:false, step:'arm', steps}` with repair guidance (or armed-but-degraded flags) —
+  never a bare `-32603` that invites a duplicate-goal retry.
+- **`keyoku_call_timeout_ms` floors at 1000ms (L2-5):** a config value of 0 no longer
+  makes every keyoku RPC time out instantly.
+- **Byte-true caps (L3-1):** `capReason` caps UTF-8 bytes (code-point safe), so multibyte
+  file-controlled text can no longer blow the documented 1.5KB/2KB budgets.
+- **Hermetic gates are honest (audit F1):** `claudeJsonPath` no longer falls through an
+  empty `CLAUDE_CONFIG_DIR` to the real `~/.claude.json`; the scaffold gate fails loudly
+  unless the fixture server answers — the suite can never silently pass against real
+  keyoku.
+- **Observability:** every evaluated Stop (including silent allows) journals one line to
+  `~/.belay/decisions.jsonl` (self-capping); `belay status` warns when an active
+  autonomous focus has no sessionId pin.
+- **Packaging (audit F3/F4):** the npm tarball now ships `docs/` and `CHANGELOG.md`; the
+  shipped version's changelog matches the shipped code, and a scaffold test pins
+  `SERVER_INFO.version` to `package.json`.
+
+### Renamed to belay + one-command bundle + autonomous e2e proof
 
 - **Rename (ADR-8):** `conductor` → `belay` swept across bin, src, tests, help text, config
   path, env var (`CONDUCTOR_DIR` → `BELAY_DIR`), state dir (`~/.conductor` → `~/.belay`),
@@ -25,7 +102,7 @@
   flipping to converged/0-unmet makes it allow (loop stops); the continuation counter is bounded
   (eventually allows); and a `git push` under the autonomous goal still asks for approval.
 
-## Unreleased — adversarial-refute hardening
+### Adversarial-refute hardening (first pass, 2026-07-01)
 
 Seven confirmed bugs fixed (each with a spawn-based regression test that fails before,
 passes after). See `docs/DECISIONS.md` ADR-5..7.

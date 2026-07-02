@@ -309,7 +309,8 @@ belay doctor      # full-stack health: keyoku layout + version pin, tokenroom, h
 belay mcp         # stdio MCP server (belay_status, belay_loop_*, belay_propose) — registered by install
 belay loop create [--goal <slug|id>] [--objective <text> --criteria <json>]
                   [--constraints <json>] [--max-iterations <n>] [--confirm-autonomous]
-                  [--session-id <id>] [--cwd <dir>] [--proposal-id <id>]
+                  [--session-id <id> | --scope global] [--cwd <dir>] [--proposal-id <id>]
+                  # session-scoped by default (ADR-14): --session-id required unless --scope global
 belay loop list                            loop-relevant goals × arm/pause state × counters
 belay loop pause <goal> [--note <text>]    pause the Stop hold (the fall-arrest gate stays active)
 belay loop resume <goal>                   resume (re-demands a fresh goal_assess)
@@ -324,7 +325,8 @@ Zero dependencies, plain ESM, `node:test`. `npm test` spawns the real bin agains
 synthetic `KEYOKU_HOME`/`TOKENROOM_DIR`/`BELAY_DIR`/`CLAUDE_CONFIG_DIR` fixtures for
 every decision branch, drives `belay mcp` over newline stdio JSON-RPC, and exercises the
 keyoku write path against a fake-keyoku fixture server
-(`test/fixtures/fake-keyoku.mjs`). See `docs/DECISIONS.md` for the ADR log and
-`docs/DESIGN.md` for the SOTA loop design.
+(`test/fixtures/fake-keyoku.mjs` in the repo; the test suite is not shipped in the
+npm tarball). See `docs/DECISIONS.md` for the ADR log and `docs/DESIGN.md` for the SOTA
+loop design (both shipped in the package).
 
 License: Apache-2.0

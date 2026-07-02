@@ -195,7 +195,7 @@ gear the rope clips into, and this is a Claude Code **harness** integration. The
 the short `belay`. Removed `private: true` so the package is publishable (publishing itself
 is a user-side step — see the README).
 
-## ADR-9 — belay MCP: composition, not proxy *(PROPOSED — accepted at build convergence)*
+## ADR-9 — belay MCP: composition, not proxy *(ACCEPTED 2026-07-02 — build converged, refuted, hardened)*
 
 **Decision:** `belay mcp` is a hand-rolled newline-delimited stdio JSON-RPC 2.0 server
 (tokenroom's proven pattern: readline over stdin, `JSON.stringify + '\n'` out; zero deps).
@@ -219,7 +219,7 @@ mirrors tokenroom's ADR-24: MCP calls carry no session id, so with ≥2 accounts
 the last 10 minutes and no `session_id` argument, quota figures are withheld with an
 explicit `attribution` note — wrong-account numbers are worse than none.
 
-## ADR-10 — keyoku writes only through keyoku's registered process *(PROPOSED — accepted at build convergence)*
+## ADR-10 — keyoku writes only through keyoku's registered process *(ACCEPTED 2026-07-02 — build converged, refuted, hardened)*
 
 **Decision:** When belay must WRITE keyoku state (goal_create / goal_update / goal_focus /
 goal_unfocus for loop create/disarm), it spawns the `~/.claude.json`-registered keyoku
@@ -244,7 +244,7 @@ server can echo its env — provider SDKs put keys in request URLs, DEBUG modes 
 and format-only ADR-7 sanitization cannot redact secrets, so transport errors carry only
 belay-authored text). The version pin >=2.7 <3 stays doctor-checked.
 
-## ADR-11 — proposals never act *(PROPOSED — accepted at build convergence)*
+## ADR-11 — proposals never act *(ACCEPTED 2026-07-02 — build converged, refuted, hardened)*
 
 **Decision:** The proposal pipeline is scan (pure file reads over the S1–S5 signals) →
 persist (`~/.belay/proposals.json`, content-hash ids) → surface (SessionStart
@@ -265,7 +265,7 @@ ADR-6 bounds every loop, and the arm is provenance-logged and auditable via
 summaries, goal slugs, keyoku ripe text), so the full ADR-7 sanitize+cap posture applies;
 zero open proposals means zero output (the silent no-op posture of ADR-4).
 
-## ADR-12 — pause suspends the rope, never the arrest *(PROPOSED — accepted at build convergence)*
+## ADR-12 — pause suspends the rope, never the arrest *(ACCEPTED 2026-07-02 — build converged, refuted, hardened)*
 
 **Decision:** `belay_loop_pause` suspends ONLY the Stop-hook hold (one unconditional-allow
 branch keyed on `loops.json` `paused`). While the goal remains focused + autonomous +
