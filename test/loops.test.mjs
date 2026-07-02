@@ -234,6 +234,7 @@ test('loop create (inline): goal created autonomous via keyoku child, focused to
   assert.equal(e.paused, false);
   assert.equal(e.armed_by, 'model');
   assert.equal(e.session_id, 's1');
+  assert.equal(e.loop_scope, 'session'); // ADR-14 provenance
   assert.equal(e.cwd, '/tmp/proj');
   const st = JSON.parse(readFileSync(join(h.belay, 'state.json'), 'utf8'));
   assert.deepEqual({ goalId: st.sessions.s1.goalId, continuations: st.sessions.s1.continuations, staleBlocked: st.sessions.s1.staleBlocked }, { goalId: out.goal.id, continuations: 0, staleBlocked: false });
@@ -248,7 +249,7 @@ test('loop create (inline): goal created autonomous via keyoku child, focused to
 test('loop create (inline): keyoku’s own validation refusal returns verbatim as {ok:false, step:create}; nothing armed', async () => {
   const h = homes();
   writeClaudeJson(h);
-  const r = run(h, ['loop', 'create', '--objective', 'no checks', '--criteria', '[]']);
+  const r = run(h, ['loop', 'create', '--objective', 'no checks', '--criteria', '[]', '--session-id', 's1']);
   const out = JSON.parse(r.stdout);
   assert.equal(out.ok, false);
   assert.equal(out.step, 'create');
@@ -262,7 +263,7 @@ test('loop create (ref): non-autonomous goal WITHOUT confirm_autonomous → refu
   writeClaudeJson(h);
   writeKeyoku(h, { goals: [goal({ autonomy: 'suggest' })] });
   const before = readFileSync(join(h.keyoku, 'goals.json'), 'utf8');
-  const out = JSON.parse(run(h, ['loop', 'create', '--goal', 'ship-widget', '--cwd', '/tmp/proj']).stdout);
+  const out = JSON.parse(run(h, ['loop', 'create', '--goal', 'ship-widget', '--session-id', 's1', '--cwd', '/tmp/proj']).stdout);
   assert.equal(out.ok, false);
   assert.equal(out.step, 'autonomy');
   assert.match(out.error, /confirm_autonomous:true/);
@@ -275,7 +276,7 @@ test('loop create (ref): --confirm-autonomous raises autonomy via keyoku goal_up
   const h = homes();
   writeClaudeJson(h);
   writeKeyoku(h, { goals: [goal({ autonomy: 'suggest' })] });
-  const out = JSON.parse(run(h, ['loop', 'create', '--goal', 'ship-widget', '--confirm-autonomous', '--cwd', '/tmp/proj']).stdout);
+  const out = JSON.parse(run(h, ['loop', 'create', '--goal', 'ship-widget', '--confirm-autonomous', '--session-id', 's1', '--cwd', '/tmp/proj']).stdout);
   assert.equal(out.ok, true, JSON.stringify(out));
   assert.deepEqual(out.steps.map((s) => s.step), ['resolve', 'autonomy', 'focus', 'arm']);
   assert.equal(readGoalsFile(h)[0].autonomy, 'autonomous'); // raised through keyoku’s own process
@@ -288,7 +289,7 @@ test('loop create (ref): blocked goal → refused with raise-maxIterations guida
   writeClaudeJson(h);
   writeKeyoku(h, { goals: [goal({ status: 'blocked' })] });
   const before = readFileSync(join(h.keyoku, 'goals.json'), 'utf8');
-  const out = JSON.parse(run(h, ['loop', 'create', '--goal', 'ship-widget']).stdout);
+  const out = JSON.parse(run(h, ['loop', 'create', '--goal', 'ship-widget', '--session-id', 's1']).stdout);
   assert.equal(out.ok, false);
   assert.equal(out.step, 'autonomy');
   assert.match(out.error, /maxIterations/);
@@ -299,17 +300,17 @@ test('loop create: unknown ref and missing-both-modes → step resolve; keyoku n
   const h = homes();
   writeClaudeJson(h);
   writeKeyoku(h, { goals: [goal()] });
-  const miss = JSON.parse(run(h, ['loop', 'create', '--goal', 'nope']).stdout);
+  const miss = JSON.parse(run(h, ['loop', 'create', '--goal', 'nope', '--session-id', 's1']).stdout);
   assert.equal(miss.ok, false);
   assert.equal(miss.step, 'resolve');
-  const neither = JSON.parse(run(h, ['loop', 'create']).stdout);
+  const neither = JSON.parse(run(h, ['loop', 'create', '--session-id', 's1']).stdout);
   assert.equal(neither.ok, false);
   assert.equal(neither.step, 'resolve');
 
   // hermetic not-registered world (CLAUDE_JSON pinned to a nonexistent file)
   const h2 = homes();
   await withEnv(worldEnv(h2), async () => {
-    const out = await loopCreate({ objective: 'x', criteria: [{ description: 'd' }] });
+    const out = await loopCreate({ objective: 'x', criteria: [{ description: 'd' }], session_id: 's1' });
     assert.equal(out.ok, false);
     assert.equal(out.step, 'spawn');
     assert.equal(out.error, 'keyoku MCP server not registered');
@@ -319,7 +320,7 @@ test('loop create: unknown ref and missing-both-modes → step resolve; keyoku n
 test('loop create: inline payload over the 64KB cap → refused locally, no child spawned', async () => {
   const h = homes();
   await withEnv(worldEnv(h), async () => {
-    const out = await loopCreate({ objective: 'big', criteria: [{ description: 'x'.repeat(70 * 1024) }] });
+    const out = await loopCreate({ objective: 'big', criteria: [{ description: 'x'.repeat(70 * 1024) }], session_id: 's1' });
     assert.equal(out.ok, false);
     assert.equal(out.step, 'resolve');
     assert.match(out.error, /64KB cap/);
@@ -330,7 +331,7 @@ test('loop create (proposal): --proposal-id marks the proposal armed and records
   const h = homes();
   writeClaudeJson(h);
   writeProposals(h, [{ id: 'prop-1', kind: 'resume-ready', summary: 'finish it' }, { id: 'prop-2' }]);
-  const out = JSON.parse(run(h, ['loop', 'create', '--objective', 'finish deferred work', '--criteria', CRITERIA, '--proposal-id', 'prop-1', '--cwd', '/tmp/proj']).stdout);
+  const out = JSON.parse(run(h, ['loop', 'create', '--objective', 'finish deferred work', '--criteria', CRITERIA, '--proposal-id', 'prop-1', '--session-id', 's1', '--cwd', '/tmp/proj']).stdout);
   assert.equal(out.ok, true);
   const e = readLoopsFile(h).loops[out.goal.id];
   assert.equal(e.armed_by, 'proposal:prop-1');
@@ -338,6 +339,41 @@ test('loop create (proposal): --proposal-id marks the proposal armed and records
   const props = JSON.parse(readFileSync(join(h.belay, 'proposals.json'), 'utf8')).proposals;
   assert.equal(props.find((p) => p.id === 'prop-1').status, 'armed');
   assert.equal(props.find((p) => p.id === 'prop-2').status, 'open'); // only the armed one flips
+});
+
+// ── ADR-14: loops are session-scoped by default ─────────────────────────────────────────
+
+test('loop create: SESSION-scoped by default (ADR-14) — no session_id and no scope → refused pre-spawn, keyoku untouched', () => {
+  const h = homes();
+  writeClaudeJson(h);
+  const out = JSON.parse(run(h, ['loop', 'create', '--objective', 'x', '--criteria', CRITERIA]).stdout);
+  assert.equal(out.ok, false);
+  assert.equal(out.step, 'scope');
+  assert.match(out.error, /session_id/);
+  assert.match(out.error, /'global'/);
+  assert.equal(existsSync(join(h.keyoku, 'goals.json')), false); // refused BEFORE any spawn — fake-keyoku never ran
+  assert.equal(existsSync(join(h.keyoku, 'focus.json')), false);
+  assert.equal(existsSync(join(h.belay, 'loops.json')), false);
+  // bogus scope value → refused
+  const bad = JSON.parse(run(h, ['loop', 'create', '--objective', 'x', '--criteria', CRITERIA, '--scope', 'everything']).stdout);
+  assert.equal(bad.ok, false);
+  assert.equal(bad.step, 'scope');
+  // global + session_id is contradictory → refused
+  const both = JSON.parse(run(h, ['loop', 'create', '--objective', 'x', '--criteria', CRITERIA, '--scope', 'global', '--session-id', 's1']).stdout);
+  assert.equal(both.ok, false);
+  assert.equal(both.step, 'scope');
+  assert.match(both.error, /contradictory/);
+});
+
+test('loop create: scope global arms an UNPINNED cwd focus (explicit opt-in) and records loop_scope provenance', () => {
+  const h = homes();
+  writeClaudeJson(h);
+  const out = JSON.parse(run(h, ['loop', 'create', '--objective', 'subtree loop', '--criteria', CRITERIA, '--scope', 'global', '--cwd', '/tmp/proj']).stdout);
+  assert.equal(out.ok, true, JSON.stringify(out));
+  const focus = JSON.parse(readFileSync(join(h.keyoku, 'focus.json'), 'utf8'));
+  assert.equal(focus.sessionId, undefined); // global = deliberately unpinned
+  assert.equal(focus.cwd, '/tmp/proj');
+  assert.equal(readLoopsFile(h).loops[out.goal.id].loop_scope, 'global');
 });
 
 // ── belay_loop_disarm ───────────────────────────────────────────────────────────────────

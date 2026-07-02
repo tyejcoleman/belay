@@ -82,7 +82,7 @@ Response fields → exact sources (nothing invented):
 #### T2 `belay_loop_create` — objective → armed loop, one confirmed call
 ```json
 { "name": "belay_loop_create",
-  "description": "Create-and-arm an autonomous convergence loop. Either reference an existing keyoku goal or define one inline (criteria = machine-checkable probes + assertions, forwarded verbatim to keyoku's own goal_create). Belay routes all writes through keyoku's own process, focuses the goal scoped to this session/cwd, arms the loop, and returns the first would-block verdict. THIS CALL IS THE CONFIRMATION that an autonomous loop should run; irreversible actions remain human-gated by the PreToolUse fall-arrest regardless.",
+  "description": "Create-and-arm an autonomous convergence loop. Either reference an existing keyoku goal or define one inline (criteria = machine-checkable probes + assertions, forwarded verbatim to keyoku's own goal_create). Belay routes all writes through keyoku's own process, focuses the goal, arms the loop, and returns the first would-block verdict. SCOPE (ADR-14): loops are SESSION-scoped by default — session_id is REQUIRED (the focus is pinned so only YOUR session is held) unless you pass scope:'global', which holds EVERY Claude Code session under the cwd subtree (an explicit opt-in; use only when conscripting sibling sessions is intended). THIS CALL IS THE CONFIRMATION that an autonomous loop should run; irreversible actions remain human-gated by the PreToolUse fall-arrest regardless.",
   "inputSchema": { "type": "object", "properties": {
       "goal": { "type": "string", "description": "existing keyoku goal slug or id (omit when defining inline)" },
       "objective": { "type": "string", "description": "inline creation: what converged looks like, one sentence" },
@@ -90,7 +90,8 @@ Response fields → exact sources (nothing invented):
       "constraints": { "type": "array", "items": { "type": "string" } },
       "maxIterations": { "type": "number" },
       "confirm_autonomous": { "type": "boolean", "description": "REQUIRED true when `goal` references an existing goal whose autonomy is not already 'autonomous' — belay will then raise it via keyoku goal_update. Without it, non-autonomous referenced goals are refused (a loop must not silently convert a human-gated goal; ADR-2)." },
-      "session_id": { "type": "string", "description": "scope the focus (and the loop) to this session" },
+      "scope": { "type": "string", "enum": ["session", "global"], "description": "default 'session': the loop is pinned to session_id (required) and holds ONLY that session. 'global': no session pin — the Stop hook holds EVERY session under the cwd subtree until convergence (explicit opt-in; contradictory with session_id)." },
+      "session_id": { "type": "string", "description": "the arming session's id (from the hook payload or the transcript path) — REQUIRED unless scope:'global'; the focus and the loop are pinned to it" },
       "cwd": { "type": "string", "description": "scope the focus to this project subtree (default: server cwd)" },
       "proposal_id": { "type": "string", "description": "when arming a surfaced proposal — marks it armed in the proposal log" }
     }, "additionalProperties": false } }
@@ -98,7 +99,7 @@ Response fields → exact sources (nothing invented):
 Pipeline (all keyoku writes via §2.4; each step's result echoed in the response):
 1. **Resolve/create.** `goal` given → read `goals.json` to verify it exists (read-only). Inline → keyoku-child `goal_create` with `{objective, criteria, constraints, maxIterations, autonomy:"autonomous"}` — belay does **not** re-validate criteria; keyoku's zod errors return verbatim (single validator, no drift).
 2. **Autonomy.** Existing goal not `autonomous`: require `confirm_autonomous:true`, then keyoku-child `goal_update {autonomy:"autonomous"}` (else refuse with the ADR-2 explanation). Existing `blocked` goal: refuse with guidance to raise `maxIterations` via keyoku directly (belay doesn't silently un-block).
-3. **Focus.** keyoku-child `goal_focus {goal, cwd, sessionId?}` — keyoku owns `focus.json`; belay never writes it.
+3. **Focus.** keyoku-child `goal_focus {goal, cwd, sessionId?}` — keyoku owns `focus.json`; belay never writes it. **ADR-14:** default scope `session` REQUIRES `session_id` and pins it (refused pre-spawn otherwise); `scope:'global'` is the explicit unpinned opt-in.
 4. **Arm.** Write `~/.belay/loops.json` entry (§3.1) `{armed:true, paused:false, armed_by, proposal_id?}`; reset this `(session_id ?? focus-scope, goalId)` counter entry in `~/.belay/state.json` (fresh loop = fresh continuation budget — same semantics as "focused goal changed" today); mark `proposal_id` armed in `proposals.json` when given.
 5. **Report.** Return `belay_status` composition + `next: "run keyoku goal_assess to establish ground truth; the Stop hook will hold this session until convergence, budget floor, or the continuation cap"`.
 
@@ -159,6 +160,7 @@ Source: `src/propose.mjs scan()` (§4). `dismiss` writes `proposals.json`.
   loops.json       NEW  { "loops": { "<goalId>": {
                        "armed": true, "paused": false,
                        "armed_at": <epoch>, "armed_by": "model"|"user"|"proposal:<id>",
+                       "loop_scope": "session"|"global"   (ADR-14 provenance),
                        "session_id": "...", "cwd": "...", "note": "...",
                        "paused_at": <epoch|null> } } }
   proposals.json   NEW  { "proposals": [ { "id": "<sha256-12 of kind+key-fields>",

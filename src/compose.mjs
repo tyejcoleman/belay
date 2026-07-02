@@ -171,6 +171,7 @@ export function buildStatus({ session_id, cwd } = {}) {
           paused: le.paused === true,
           armed_at: num(le.armed_at),
           armed_by: typeof le.armed_by === 'string' ? sanitizeText(le.armed_by, 64) : null,
+          scope: le.loop_scope === 'session' || le.loop_scope === 'global' ? le.loop_scope : null, // ADR-14 provenance
           proposal_id: typeof le.proposal_id === 'string' ? sanitizeSlug(le.proposal_id, 32) : null,
         }
       : null;

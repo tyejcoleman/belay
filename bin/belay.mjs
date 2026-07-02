@@ -73,6 +73,7 @@ switch (cmd) {
           constraints,
           maxIterations: f.max_iterations !== undefined ? Number(f.max_iterations) : undefined,
           confirm_autonomous: f.confirm_autonomous === true,
+          scope: typeof f.scope === 'string' ? f.scope : undefined,
           session_id: typeof f.session_id === 'string' ? f.session_id : undefined,
           cwd: typeof f.cwd === 'string' ? f.cwd : process.cwd(),
           proposal_id: typeof f.proposal_id === 'string' ? f.proposal_id : undefined,
@@ -126,8 +127,9 @@ usage:
   belay mcp                                        stdio MCP server (belay_status, belay_loop_*, belay_propose) — registered by install
   belay loop create [--goal <slug|id>] [--objective <text> --criteria <json>]
                     [--constraints <json>] [--max-iterations <n>] [--confirm-autonomous]
-                    [--session-id <id>] [--cwd <dir>] [--proposal-id <id>]
-                                                   create-and-arm an autonomous convergence loop (writes via keyoku's own process)
+                    [--session-id <id> | --scope global] [--cwd <dir>] [--proposal-id <id>]
+                                                   create-and-arm an autonomous convergence loop (writes via keyoku's own process;
+                                                   session-scoped by default — --session-id required unless --scope global)
   belay loop list                                  loop-relevant goals × arm/pause state × counters
   belay loop pause <goal> [--note <text>]          pause the Stop-hook hold (the fall-arrest gate stays active)
   belay loop resume <goal>                         resume a paused loop (re-demands fresh goal_assess)

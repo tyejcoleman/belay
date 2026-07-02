@@ -90,8 +90,9 @@ const refuse = (error) => ({ ok: false, error });
  * Failure at any step → { ok:false, step, error } (sanitized), completed steps reported.
  *
  * @param {{ goal?: string, objective?: string, criteria?: object[], constraints?: string[],
- *          maxIterations?: number, confirm_autonomous?: boolean, session_id?: string,
- *          cwd?: string, proposal_id?: string }} args — belay_loop_create schema, verbatim
+ *          maxIterations?: number, confirm_autonomous?: boolean, scope?: 'session'|'global',
+ *          session_id?: string, cwd?: string, proposal_id?: string }} args — belay_loop_create
+ *          schema, verbatim. Default scope 'session' REQUIRES session_id (ADR-14).
  * @returns {Promise<object>} { ok:true, goal, status, next } | { ok:false, step, error }
  */
 export async function loopCreate(args = {}) {
@@ -100,6 +101,25 @@ export async function loopCreate(args = {}) {
   const cwd = typeof args.cwd === 'string' && args.cwd ? args.cwd : process.cwd();
   const sessionId = typeof args.session_id === 'string' && args.session_id ? args.session_id : null;
   const ref = typeof args.goal === 'string' && args.goal ? args.goal : null;
+
+  // 0 — scope (ADR-14): loops are SESSION-scoped by default. keyoku's focus is a global
+  // singleton and a cwd-only focus scope-matches EVERY session under the subtree — an
+  // unpinned default conscripted a foreign session live on 2026-07-02 (TEST-A #2). So the
+  // default demands the arming session's id and pins it in goal_focus; holding the whole
+  // subtree is an explicit scope:'global' opt-in, never a silent side effect.
+  const scope = args.scope === undefined ? 'session' : args.scope;
+  if (scope !== 'session' && scope !== 'global') {
+    return fail('scope', `scope must be 'session' or 'global' (got '${sanitizeSlug(String(scope), 24)}')`);
+  }
+  if (scope === 'session' && !sessionId) {
+    return fail(
+      'scope',
+      "belay loops are SESSION-scoped by default: pass session_id (this session's id, from the hook payload or your transcript path) so ONLY the arming session is held by the Stop hook — or pass scope:'global' to deliberately hold EVERY session under the cwd subtree. Nothing was created or focused."
+    );
+  }
+  if (scope === 'global' && sessionId) {
+    return fail('scope', "scope:'global' and session_id are contradictory — omit session_id to hold the whole cwd subtree, or drop scope:'global' to pin the loop to that session");
+  }
 
   // 1a/2 — everything refusable is refused BEFORE any spawn (a refusal must leave
   // keyoku byte-identical, and never costs a child).
@@ -191,6 +211,7 @@ export async function loopCreate(args = {}) {
     paused: false,
     armed_at: nowSec,
     armed_by: proposalId ? `proposal:${sanitizeSlug(proposalId, 64)}` : 'model',
+    loop_scope: scope, // ADR-14 provenance: 'session' (pinned) | 'global' (explicit subtree hold)
     session_id: sessionId,
     cwd,
     note: null,

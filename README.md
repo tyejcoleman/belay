@@ -128,10 +128,12 @@ belay_loop_create({
 ```
 
 Belay creates the goal through keyoku's own process (autonomy `autonomous`), focuses it
-scoped to your session/cwd, arms the loop, and returns the first would-block verdict.
-That explicit call **is** the confirmation an autonomous loop should run — and the
-fall-arrest keeps gating irreversibles regardless. (CLI equivalent:
-`belay loop create --objective "…" --criteria '[…]'`.)
+**pinned to your session** (loops are session-scoped by default — `session_id` is
+required, and the call is refused without it unless you explicitly pass `scope:'global'`
+to hold every session under the cwd subtree; ADR-14), arms the loop, and returns the
+first would-block verdict. That explicit call **is** the confirmation an autonomous loop
+should run — and the fall-arrest keeps gating irreversibles regardless. (CLI equivalent:
+`belay loop create --objective "…" --criteria '[…]' --session-id <id>`.)
 
 **By hand (all in Keyoku).** `goal_create` with machine-checkable criteria →
 `goal_focus` → set autonomy to `autonomous` → `belay doctor` to confirm the legs are

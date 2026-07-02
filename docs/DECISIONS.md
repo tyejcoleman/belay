@@ -297,6 +297,32 @@ exact fall-arrest failure the gate exists to prevent. The escalation applies to 
 floor too, because an unaskable ask is a lie in all cases — the deny reason tells the model
 to do the work inline instead.
 
+## ADR-14 — loops are session-scoped by default
+
+**Decision:** `belay_loop_create` defaults to `scope: "session"`: the caller MUST pass
+`session_id`, and belay pins it in keyoku `goal_focus` (`{goal, cwd, sessionId}`), so the
+Stop hold and the fall-arrest apply ONLY to the arming session. If `session_id` is absent
+and `scope` is not explicitly `"global"`, the call is refused pre-spawn with an error
+telling the model to pass `session_id` or `scope:"global"` — nothing is created or
+focused. `scope:"global"` is the explicit opt-in for the old behavior (cwd-only focus that
+holds every session under the subtree); combining it with `session_id` is refused as
+contradictory. The chosen scope is recorded as `loop_scope` in the `loops.json` entry
+(provenance, surfaced by `belay_status`), and the tool description states the default and
+the opt-in in plain terms.
+
+**Why:** keyoku's `focus.json` is a global singleton and `scopeMatch` holds ANY session
+whose cwd is inside a cwd-only focus subtree. With `session_id` optional and unknowable to
+the MCP server, the DEFAULT arm produced an unpinned focus that conscripted unrelated
+sessions — observed live 2026-07-02 (TEST-A #2: the orchestrator session ate another
+session's stale-block + unmet-block, did its work, and converged its goal). ADR-5 already
+states the principle: "if ancestor/orchestrator sessions must be holdable, the opt-in is an
+explicit sessionId pin, never a cwd subtree guess" — the same must hold for siblings.
+Refusing (rather than silently arming unpinned) is the only honest default because belay
+cannot discover the caller's session id (ADR-9: MCP calls carry no session id); the model
+CAN — it is in every hook payload and the transcript path. The refusal text teaches
+exactly that. The old description text ("scoped to this session/cwd") claimed a pin that
+by default never happened; the description now says what the tool actually does.
+
 ## Non-ADR notes
 
 - **Compliance line (from the mission):** official surfaces only — Stop and PreToolUse
