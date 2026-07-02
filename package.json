@@ -1,0 +1,33 @@
+{
+  "name": "conductor-harness",
+  "version": "0.1.0",
+  "description": "Always-on goal loop for Claude Code: a Stop hook that keeps the agent working while its focused Keyoku goal is unconverged and budget allows, plus a PreToolUse policy gate (autonomy x budget x action-class). Reads Keyoku and tokenroom state files; never spawns their processes. NOTE: 'conductor-harness' is a placeholder name — final npm name TBD; private until named.",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "conductor": "bin/conductor.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "claude-code",
+    "hooks",
+    "stop-hook",
+    "goal-loop",
+    "keyoku",
+    "tokenroom",
+    "autonomy",
+    "agent"
+  ]
+}
