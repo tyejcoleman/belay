@@ -1,5 +1,30 @@
 # Changelog
 
+> **Renamed `conductor` → `belay` (ADR-8).** The command/bin is now `belay`
+> (`bin/belay.mjs`), the npm package is **`belay-harness`** (bare `belay` is taken), the
+> state dir is `~/.belay` (env `BELAY_DIR`), and block/ask reasons carry the `[belay]`
+> prefix. `private: true` was removed so the package is publishable. The metaphor: the
+> belayer feeds rope so the climber keeps ascending and arrests the fall — the Stop hook
+> feeds rope, the PreToolUse gate is the fall-arrest. **Entries below this line predate the
+> rename and name the tool "conductor"; they are kept verbatim as accurate history.**
+
+## Unreleased — renamed to belay + one-command bundle + autonomous e2e proof
+
+- **Rename (ADR-8):** `conductor` → `belay` swept across bin, src, tests, help text, config
+  path, env var (`CONDUCTOR_DIR` → `BELAY_DIR`), state dir (`~/.conductor` → `~/.belay`),
+  and block-reason prefix (`[conductor]` → `[belay]`). npm name `belay-harness`; publishable.
+- **`belay bundle`** — one command that wires the whole autonomous stack: detects & invokes
+  tokenroom's installer (or tells you to install it first), verifies the keyoku MCP server is
+  registered (read-only; never modifies it), installs belay's own Stop + PreToolUse hooks
+  additively (preserving tokenroom's and any others), and prints a three-leg status summary
+  plus the exact next steps to arm an autonomous goal. `--dry-run` supported; idempotent.
+- **`belay doctor`** now opens with a full-stack health view (tokenroom present+installed?,
+  keyoku present+version-in-range?, belay hooks registered?) before the detailed self-checks.
+- **`test/autonomous-e2e.test.mjs`** — proves the self-driving loop end to end on temp state:
+  a seeded autonomous goal with an unmet criterion makes the Stop hook block (loop continues);
+  flipping to converged/0-unmet makes it allow (loop stops); the continuation counter is bounded
+  (eventually allows); and a `git push` under the autonomous goal still asks for approval.
+
 ## Unreleased — adversarial-refute hardening
 
 Seven confirmed bugs fixed (each with a spawn-based regression test that fails before,

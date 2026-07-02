@@ -5,7 +5,7 @@ import { readBudget } from './budget.mjs';
 import { readOwnState, sessionEntry } from './state.mjs';
 import { decideStop } from './stop.mjs';
 
-/** `conductor status` — current focused goal + the would-block verdict + counters.
+/** `belay status` — current focused goal + the would-block verdict + counters.
  *  Evaluates the SAME decision function the Stop hook runs, from the focus's own scope
  *  (so a session-pinned focus is judged as that session would be). Read-only. */
 export function status() {
@@ -19,10 +19,10 @@ export function status() {
   const { cfg } = readConfig();
   const budget = readBudget(payload.session_id);
 
-  console.log(`conductor status (keyoku: ${k.home})`);
-  if (!k.present) return console.log('  keyoku home not found — conductor idles');
-  if (k.paused) return console.log("  'paused' marker present — conductor is a no-op");
-  if (!k.focus) return console.log('  no focused goal — conductor idles');
+  console.log(`belay status (keyoku: ${k.home})`);
+  if (!k.present) return console.log('  keyoku home not found — belay idles');
+  if (k.paused) return console.log("  'paused' marker present — belay is a no-op");
+  if (!k.focus) return console.log('  no focused goal — belay idles');
 
   const own = readOwnState();
   const entry = sessionEntry(own, payload.session_id, k.goal?.id ?? null);

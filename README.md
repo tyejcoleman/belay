@@ -1,29 +1,31 @@
-# conductor
+# belay
 
 **The always-on goal loop for Claude Code — on official surfaces only.**
 
-Conductor is a Stop hook that keeps an agent working while its focused
-[Keyoku](../Keyoku) goal is unconverged and budget allows, plus a PreToolUse policy gate
-(autonomy × budget × action-class). It **reads** two other tools' state files —
-Keyoku's goals/focus/observations and [tokenroom](https://github.com/tyejcoleman/tokenroom)'s
+*In climbing, the belayer feeds rope so the climber keeps ascending and arrests the fall
+if they slip.* Belay does exactly that for an agent: the **Stop hook** feeds rope (keeps
+the agent working while its focused [Keyoku](../Keyoku) goal is unconverged and budget
+allows), and the **PreToolUse gate** is the fall-arrest (irreversible/external actions
+route to the human). It **reads** two other tools' state files — Keyoku's
+goals/focus/observations and [tokenroom](https://github.com/tyejcoleman/tokenroom)'s
 budget — and never spawns their processes from hooks.
 
-> npm name note: `conductor-harness` in package.json is a **placeholder** — the final
-> npm name is TBD and the package stays `private: true` until it is named.
+> **Name:** the command/bin is `belay`; the npm package is **`belay-harness`** (the bare
+> `belay` name is already taken on npm). Formerly published internally as `conductor`.
 
 ## The honest scope line
 
-Conductor **continues work within a session** and **advises across sessions**. It never
+Belay **continues work within a session** and **advises across sessions**. It never
 launches headless runs, never reuses credentials, never calls the network, and never
 burns quota outside the interactive session you are already in. When the session ends,
-conductor's job ends; the most it does for "later" is wording in a block reason
+belay's job ends; the most it does for "later" is wording in a block reason
 (checkpoint, `plan_resume`, "suggest the user switch profiles"). That's the compliance
 line, on purpose.
 
 ## What it does
 
 - **Stop hook** — when the agent tries to stop while a scope-matched, focused,
-  **autonomous** Keyoku goal still has unmet criteria, conductor blocks the stop and
+  **autonomous** Keyoku goal still has unmet criteria, belay blocks the stop and
   hands back the unmet criteria (with descriptions) plus the current budget picture.
   When there is nothing to hold — no focus, human-in-the-loop autonomy, converged,
   quota-dead, counters exhausted — it allows the stop, silently.
@@ -32,28 +34,28 @@ line, on purpose.
   writes to non-localhost, MCP send/publish tools) are routed to the **human** via
   `permissionDecision: "ask"`. Expensive spawns (Task/Agent/Workflow) are asked about
   under thin budget. Everything else passes untouched.
-- **No-op by default** — no focused autonomous goal means conductor does nothing at all.
+- **No-op by default** — no focused autonomous goal means belay does nothing at all.
   It never polices normal interactive use.
 
 ## Install
 
 ```sh
-git clone <this repo> && cd conductor
-node bin/conductor.mjs install     # registers Stop + PreToolUse hooks (additive; backs up settings.json)
-node bin/conductor.mjs doctor      # verifies keyoku layout, tokenroom presence, hook registration, config
+git clone <this repo> && cd belay
+node bin/belay.mjs install     # registers Stop + PreToolUse hooks (additive; backs up settings.json)
+node bin/belay.mjs doctor      # verifies keyoku layout, tokenroom presence, hook registration, config
 ```
 
 `install` preserves every existing hook (tokenroom's included), never duplicates on
 re-run, and refuses to install from the npx cache (evictable paths). `uninstall`
-removes only conductor's entries.
+removes only belay's entries.
 
 ## Decision table
 
-### Stop hook (`conductor hook stop`)
+### Stop hook (`belay hook stop`)
 
 | # | Condition (checked in order) | Decision |
 |---|---|---|
-| 1 | `stop_hook_active` (any value) | **not consulted** — conductor substitutes its OWN bounded budget for the harness guard (ADR-6): every stop is evaluated, and its monotonic per-(session, goal) counter guarantees termination without depending on the flag. |
+| 1 | `stop_hook_active` (any value) | **not consulted** — belay substitutes its OWN bounded budget for the harness guard (ADR-6): every stop is evaluated, and its monotonic per-(session, goal) counter guarantees termination without depending on the flag. |
 | 2 | keyoku home absent, or `paused` marker present | **allow**, silent |
 | 3 | no/unreadable `focus.json`, focused goal missing from `goals.json` | **allow**, silent |
 | 4 | scope mismatch (focus `sessionId` differs; or the **session cwd is not inside** the focus `cwd` subtree — one-way, ADR-5) | **allow**, silent |
@@ -74,7 +76,7 @@ land`; a known-fresh second profile adds `profile '<label>' has ≈Y% — finish
 here, then suggest the user switch`. Budget UNKNOWN (tokenroom absent/stale/pre-reset
 data) → block carries **no** budget line (permissive for stop decisions — never invent a figure).
 
-### PreToolUse gate (`conductor hook pre-tool-use`)
+### PreToolUse gate (`belay hook pre-tool-use`)
 
 | Condition | Decision |
 |---|---|
@@ -86,11 +88,11 @@ data) → block carries **no** budget line (permissive for stop decisions — ne
 | Task/Agent/Workflow while budget < `spawn_floor_pct` (10%) — fresh, **or stale last-known** (conservative) — and no fresh alt profile | **ask** — `budget descent: no new subagents below 10% — do the work inline in small steps` |
 | everything else | silent (allow) |
 
-## Configuration — `~/.conductor/config.json`
+## Configuration — `~/.belay/config.json`
 
 ```jsonc
 {
-  "max_continuations": 25,     // forced continuations per (session, goal) before conductor lets go; monotonic, resets on goal change (ADR-6 termination bound)
+  "max_continuations": 25,     // forced continuations per (session, goal) before belay lets go; monotonic, resets on goal change (ADR-6 termination bound)
   "budget_floor_pct": 3,       // below this (no fresh alt): allow stop (descent)
   "spawn_floor_pct": 10,       // below this (no fresh alt): ask before new subagents
   "thin_budget_pct": 15,       // below this the block reason switches to descent wording
@@ -108,30 +110,30 @@ data) → block carries **no** budget line (permissive for stop decisions — ne
 ```
 
 Every field is optional and validated defensively: a bad field falls back to its default
-and `conductor doctor` reports the warning. Bad config never crashes a hook.
+and `belay doctor` reports the warning. Bad config never crashes a hook.
 
 ## What it reads (and never writes)
 
 | Source | Files | Direction |
 |---|---|---|
-| Keyoku (`$KEYOKU_HOME` \|\| `~/.keyoku`) | `paused`, `focus.json`, `goals.json`, `observations/<goalId>.jsonl` | read-only, pinned to keyoku >=2.7 <3, layout self-checked by `conductor doctor`. Never runs probes; never rewrites goals/focus. |
+| Keyoku (`$KEYOKU_HOME` \|\| `~/.keyoku`) | `paused`, `focus.json`, `goals.json`, `observations/<goalId>.jsonl` | read-only, pinned to keyoku >=2.7 <3, layout self-checked by `belay doctor`. Never runs probes; never rewrites goals/focus. |
 | tokenroom (`$TOKENROOM_DIR` \|\| `~/.tokenroom`) | `state.json`, `accounts/<key>/state.json`, `sessions.json`, `profiles.json` | read-only. >30min old → budget UNKNOWN. |
-| conductor (`$CONDUCTOR_DIR` \|\| `~/.conductor`) | `state.json` (continuation counters), `config.json` | its own state only; dirs 0700, files 0600, atomic writes. |
+| belay (`$BELAY_DIR` \|\| `~/.belay`) | `state.json` (continuation counters), `config.json` | its own state only; dirs 0700, files 0600, atomic writes. |
 
 ## CLI
 
 ```
-conductor install [--dry-run] [--config-dir <dir>]
-conductor uninstall [--config-dir <dir>]
-conductor status      # focused goal + would-block verdict + counters
-conductor doctor      # keyoku layout self-check, version pin, tokenroom, hooks, config
-conductor hook <stop|pre-tool-use>   # wired by install
+belay install [--dry-run] [--config-dir <dir>]
+belay uninstall [--config-dir <dir>]
+belay status      # focused goal + would-block verdict + counters
+belay doctor      # keyoku layout self-check, version pin, tokenroom, hooks, config
+belay hook <stop|pre-tool-use>   # wired by install
 ```
 
 ## Development
 
 Zero dependencies, plain ESM, `node:test`. `npm test` spawns the real bin against
-synthetic `KEYOKU_HOME`/`TOKENROOM_DIR`/`CONDUCTOR_DIR` fixtures for every decision
+synthetic `KEYOKU_HOME`/`TOKENROOM_DIR`/`BELAY_DIR` fixtures for every decision
 branch. See `docs/DECISIONS.md` for the ADR log.
 
 License: Apache-2.0

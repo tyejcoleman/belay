@@ -4,7 +4,7 @@ Standing decisions with their why. Do not silently violate one — propose a new
 
 ## ADR-1 — Files, not processes
 
-**Decision:** Conductor reads Keyoku's state files (`focus.json`, `goals.json`,
+**Decision:** Belay reads Keyoku's state files (`focus.json`, `goals.json`,
 `observations/*.jsonl`, the `paused` marker) and tokenroom's (`state.json`,
 `sessions.json`, `profiles.json`) directly. Hooks never spawn either tool's process and
 never run Keyoku probes.
@@ -18,11 +18,11 @@ lines are skipped).
 
 **Accepted risk + mitigation:** the file layout is keyoku's *internal* surface, and its
 store layer reserves a future SQLite swap. Mitigation: (a) version pin **>=2.7 <3**,
-checked by `conductor doctor` against keyoku's package.json when findable; (b) a
+checked by `belay doctor` against keyoku's package.json when findable; (b) a
 doctor **layout self-check** that validates the actual files against the contract, so a
 layout change fails loudly on inspection instead of silently no-opping forever; (c)
 every read degrades to "no goal" (ADR-4), so the failure mode of a layout change is
-conductor doing nothing — never doing something wrong. We also never *write* keyoku's
+belay doing nothing — never doing something wrong. We also never *write* keyoku's
 files: goals.json is a whole-array last-writer-wins clobber risk.
 
 ## ADR-2 — Only autonomous goals block a stop
@@ -45,7 +45,7 @@ never a silent rewrite.
 
 **Why:** Autonomy inside the workspace does not imply autonomy over the *world*
 (pushes, publishes, messages to humans are irreversible or externally visible).
-But conductor is not the authority on what's allowed — the user is. "ask" surfaces the
+But belay is not the authority on what's allowed — the user is. "ask" surfaces the
 question through the harness's own permission flow with the goal context attached; the
 human decides. `allow_overrides` exists so a user can pre-approve classes they trust
 (e.g. pushes to a preview branch); `ask_patterns` extends the class list. Spawn gating
@@ -57,15 +57,15 @@ nothing because there was never a measurement).
 ## ADR-4 — Degrade to no-op, everywhere
 
 **Decision:** Any absent, malformed, stale, or torn input — keyoku missing, corrupted
-JSON, unknown fields, bad config, garbage stdin — degrades to conductor doing
+JSON, unknown fields, bad config, garbage stdin — degrades to belay doing
 *nothing*: hooks exit 0 silently (a top-level try/catch at the bin dispatch guarantees
 it), bad config fields fall back to defaults with a doctor warning, and budget UNKNOWN
 is permissive for stop decisions (block without a budget line rather than invent one).
 
 **Why:** tokenroom's ADR-5 lesson, inherited: Claude Code surfaces hook failures as
-unattributed error banners, and a Stop-hook crash can wedge a session. Conductor's
+unattributed error banners, and a Stop-hook crash can wedge a session. Belay's
 failure budget is zero because it sits on the harness's critical path. The corollary is
-scope humility: conductor must be a strict no-op for normal interactive use — no
+scope humility: belay must be a strict no-op for normal interactive use — no
 focused autonomous goal, no behavior. Own state is hardened like tokenroom's
 (dirs 0700, files 0600, atomic tmp+rename writes).
 
@@ -73,12 +73,12 @@ focused autonomous goal, no behavior. Own state is hardened like tokenroom's
 
 **Decision:** For the Stop hook (and the gate), a cwd-scoped focus matches a session only
 when the **session's cwd is inside the focus subtree** (`a === b || a.startsWith(b + '/')`).
-Conductor does **not** mirror keyoku's bidirectional attribution (which also matches when
+Belay does **not** mirror keyoku's bidirectional attribution (which also matches when
 the focus cwd is inside the session cwd). The trailing-slash strip is guarded so a cwd of
 `/` (which strips to `''`) can never match everything.
 
 **Why:** keyoku's `autoRecordToFocusGoal` matches either direction because attribution is
-advisory — a wrong guess just mis-labels a recorded action. Conductor makes a **blocking**
+advisory — a wrong guess just mis-labels a recorded action. Belay makes a **blocking**
 decision, so it must be conservative. Under the old bidirectional rule, a session running
 in an **ancestor** of the goal's cwd matched the focus — so an orchestrator at the repo
 root, or any shell at `/` or `$HOME`, would have its Stop **held for a goal it is not
@@ -89,11 +89,11 @@ A genuinely global focus (no sessionId, no cwd) still matches all — that is a 
 user explicitly chose. If ancestor/orchestrator sessions must be holdable, the opt-in is an
 explicit `sessionId` pin, never a cwd subtree guess.
 
-## ADR-6 — Conductor's own bounded budget replaces the stop_hook_active blanket-allow
+## ADR-6 — Belay's own bounded budget replaces the stop_hook_active blanket-allow
 
 **Decision:** The Stop hook no longer consults Claude Code's `stop_hook_active` flag at all
 — it neither blanket-allows on it nor resets counters on it. Every stop is evaluated, and
-loop termination is governed **solely** by conductor's own durable, monotonic
+loop termination is governed **solely** by belay's own durable, monotonic
 per-`(session, goal)` guards. The continuation counter resets only when the focused goal
 changes (`sessionEntry` keys on `goalId`) or after the 7-day prune — never as a function of
 harness-supplied state.
@@ -111,13 +111,13 @@ We considered *resetting* the counter on a fresh stop (`stop_hook_active !== tru
 each user turn its own budget. Rejected: that makes termination **depend on the harness
 setting `stop_hook_active`**. If any harness (or a bug) never sets it, every stop would look
 "fresh", reset the counter, and block forever — an infinite forced-continuation wedge,
-exactly the failure ADR-4 forbids (conductor's failure budget on the critical path is
+exactly the failure ADR-4 forbids (belay's failure budget on the critical path is
 zero). A safety property must not rely on external cooperation, so termination is anchored
-to conductor's own monotonic counter instead.
+to belay's own monotonic counter instead.
 
 **Termination argument (provably bounded for ANY sequence of stops):** Fix a
 `(session, goal)`. `session_id` is stable within a session and the counter is persisted to
-`~/.conductor/state.json` (atomic write) and re-read on every stop, so it is durable across
+`~/.belay/state.json` (atomic write) and re-read on every stop, so it is durable across
 the per-stop process spawns. Consider the stops for this pair in order:
 
 1. **Unmet-criteria block** does `continuations := continuations + 1` and persists it — the
@@ -134,7 +134,7 @@ the per-stop process spawns. Consider the stops for this pair in order:
    iterations-exhausted / budget-floor / nothing-unmet).
 
 The only branches that BLOCK are (1) and (2), and both are hard-capped for the pair, so
-conductor emits **at most `max_continuations + 1` blocks per `(session, goal)`** and
+belay emits **at most `max_continuations + 1` blocks per `(session, goal)`** and
 thereafter can only `allow`. This holds for *any* interleaving of `stop_hook_active` values
 (including all-`false` and all-`true`), so the loop is provably terminating. All
 allow-guards are reachable: `continuations-exhausted` is reached by any non-converging
@@ -154,18 +154,43 @@ tame charset, and the whole reason is capped at ~2 KB.
 one the user is driving) controls its criteria descriptions and slug; a directly-written
 `profiles.json` controls the label. Those flowed **verbatim, unbounded, unsanitized** into
 the block reason — a prompt-injection channel ("ignore previous instructions…") and a
-context-flood channel (a megabyte of criteria text) aimed straight at the model. Conductor
+context-flood channel (a megabyte of criteria text) aimed straight at the model. Belay
 is on the harness's critical path and speaks in the harness's own voice, so it must treat
 all cross-goal data as untrusted input. Sanitizing at the boundary keeps the legitimate
 signal (the criteria to work on) while removing the injection/flood surface. The same fresh
 goal with **no readable assessment** (unmetDetail → null, distinct from `[]`) is not
-silently released: conductor blocks once demanding `goal_assess`, reusing the one-shot
+silently released: belay blocks once demanding `goal_assess`, reusing the one-shot
 `staleBlocked` guard so it cannot loop.
+
+## ADR-8 — Renamed `conductor` → `belay`
+
+**Decision:** The package is branded **belay**. The command/bin is `belay`
+(`bin/belay.mjs`); the npm package is **`belay-harness`**; the state dir is `~/.belay`
+(env `BELAY_DIR`); block/ask reasons carry the `[belay]` prefix; the installer MARK and
+backup suffix are `belay.mjs` / `.belay-bak`. Prior internal releases used `conductor`
+(and the placeholder npm name `conductor-harness`, kept `private`). Historical CHANGELOG
+entries and this log's earlier ADRs are read as describing the same tool under its old
+name; the standing behavior is unchanged by the rename.
+
+**Why the metaphor:** in climbing, the *belayer* manages the rope for the climber —
+feeding slack so they keep ascending, and locking off to **arrest a fall** if they slip.
+That is precisely belay's two surfaces: the **Stop hook feeds rope** (it keeps the agent
+climbing toward the goal while the goal is unconverged and budget allows), and the
+**PreToolUse gate is the fall-arrest** (irreversible/external actions — push, publish,
+external sends, destructive deletes — lock off and route to the human). "Conductor"
+described orchestration; "belay" names the actual safety-and-continuation contract, which
+reads better against the Stop-continuation + fall-arrest-gate design.
+
+**Why `belay-harness` on npm:** the bare `belay` package name is already taken (verified);
+`belay-harness` is free and doubles as a fitting name — a *harness* is the climber's
+gear the rope clips into, and this is a Claude Code **harness** integration. The bin stays
+the short `belay`. Removed `private: true` so the package is publishable (publishing itself
+is a user-side step — see the README).
 
 ## Non-ADR notes
 
 - **Compliance line (from the mission):** official surfaces only — Stop and PreToolUse
-  hooks plus the user's own dotfiles. Conductor continues work within a session and
+  hooks plus the user's own dotfiles. Belay continues work within a session and
   advises across sessions; it never launches headless runs and never touches
   credentials.
 - **profiles.json shape** — tokenroom R3.5 shipped: the real file is

@@ -24,7 +24,7 @@ const askOf = (r) => {
 
 test('git push under an autonomous goal → ask with the policy wording', () => {
   const reason = askOf(gate(armed(), toolPayload({ tool_input: { command: 'git push origin main' } })));
-  assert.equal(reason, "[conductor] 'git push' action under autonomous goal — requires human approval (goal constraint policy)");
+  assert.equal(reason, "[belay] 'git push' action under autonomous goal — requires human approval (goal constraint policy)");
 });
 
 test('npm publish and gh pr merge → ask; plain git commit / gh pr view → silent', () => {
@@ -90,7 +90,7 @@ test('spawn gate: Task/Agent/Workflow under thin budget → ask; healthy, alt-pr
   const thin = armed();
   writeTokenroom(thin, { leftPct: 8 });
   const reason = askOf(gate(thin, toolPayload({ tool_name: 'Task', tool_input: { prompt: 'go' } })));
-  assert.equal(reason, '[conductor] budget descent: no new subagents below 10% — do the work inline in small steps');
+  assert.equal(reason, '[belay] budget descent: no new subagents below 10% — do the work inline in small steps');
 
   const healthy = armed();
   writeTokenroom(healthy, { leftPct: 60 });
@@ -133,21 +133,21 @@ test('gate is inert without an autonomous focus: no focus, observe goal, scope m
 
 test('gate_enabled:false disables the gate; allow_overrides force-allow; ask_patterns extend it', () => {
   const off = armed();
-  mkdirSync(off.conductor, { recursive: true });
-  writeFileSync(join(off.conductor, 'config.json'), JSON.stringify({ gate_enabled: false }));
+  mkdirSync(off.belay, { recursive: true });
+  writeFileSync(join(off.belay, 'config.json'), JSON.stringify({ gate_enabled: false }));
   assert.equal(gate(off, toolPayload({ tool_input: { command: 'git push' } })).stdout, '');
 
   const overridden = armed();
-  mkdirSync(overridden.conductor, { recursive: true });
-  writeFileSync(join(overridden.conductor, 'config.json'), JSON.stringify({ allow_overrides: ['git push origin preview'] }));
+  mkdirSync(overridden.belay, { recursive: true });
+  writeFileSync(join(overridden.belay, 'config.json'), JSON.stringify({ allow_overrides: ['git push origin preview'] }));
   assert.equal(gate(overridden, toolPayload({ tool_input: { command: 'git push origin preview' } })).stdout, '');
   assert.match(askOf(gate(overridden, toolPayload({ tool_input: { command: 'git push origin main' } }))), /'git push'/);
 
   const extended = armed();
-  mkdirSync(extended.conductor, { recursive: true });
-  writeFileSync(join(extended.conductor, 'config.json'), JSON.stringify({ ask_patterns: [{ pattern: 'terraform\\s+apply', class: 'infra apply', note: 'production infra' }] }));
+  mkdirSync(extended.belay, { recursive: true });
+  writeFileSync(join(extended.belay, 'config.json'), JSON.stringify({ ask_patterns: [{ pattern: 'terraform\\s+apply', class: 'infra apply', note: 'production infra' }] }));
   const reason = askOf(gate(extended, toolPayload({ tool_input: { command: 'terraform apply -auto-approve' } })));
-  assert.equal(reason, "[conductor] 'infra apply' action under autonomous goal — requires human approval (goal constraint policy) — production infra");
+  assert.equal(reason, "[belay] 'infra apply' action under autonomous goal — requires human approval (goal constraint policy) — production infra");
 });
 
 test('corrupted keyoku files or non-JSON stdin → silent allow, exit 0', () => {

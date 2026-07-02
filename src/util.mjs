@@ -3,12 +3,12 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
-// Conductor is a READER of two other tools' state and a writer only of its own tiny
+// Belay is a READER of two other tools' state and a writer only of its own tiny
 // counter file. Every read here is defensive (tokenroom ADR-5 spirit, adopted as our
 // ADR-4): absent, malformed, or torn input degrades to null — never to a throw that
 // could surface as a hook error banner in the harness.
 
-export const conductorDir = () => process.env.CONDUCTOR_DIR || join(homedir(), '.conductor');
+export const belayDir = () => process.env.BELAY_DIR || join(homedir(), '.belay');
 export const tokenroomDir = () => process.env.TOKENROOM_DIR || join(homedir(), '.tokenroom');
 
 /** Counter state may reveal what the user is working on — owner-only, like tokenroom. */
@@ -110,9 +110,9 @@ export async function readStdin() {
 }
 
 // ── Config ────────────────────────────────────────────────────────────────────
-// ~/.conductor/config.json — every field optional, every field validated. A bad
+// ~/.belay/config.json — every field optional, every field validated. A bad
 // config never changes behavior silently: the bad field falls back to its default
-// and `conductor doctor` reports the warning.
+// and `belay doctor` reports the warning.
 
 export const CONFIG_DEFAULTS = {
   max_continuations: 25, // per (session, goal): own runaway-loop budget on top of Claude Code's stop_hook_active guard
@@ -173,5 +173,5 @@ export function validateConfig(raw) {
 }
 
 export function readConfig() {
-  return validateConfig(readJSON(join(conductorDir(), 'config.json')));
+  return validateConfig(readJSON(join(belayDir(), 'config.json')));
 }

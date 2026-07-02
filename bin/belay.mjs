@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// conductor — always-on goal loop for Claude Code (official surfaces only).
+// belay — always-on goal loop for Claude Code (official surfaces only).
 // Reads Keyoku goal state and tokenroom budget state from their files; never spawns
 // their processes, never runs probes, never touches credentials, never networks.
 
@@ -32,15 +32,15 @@ switch (cmd) {
     (await import('../src/status.mjs')).status(argv);
     break;
   default:
-    console.log(`conductor — always-on goal loop for Claude Code (reads Keyoku goals + tokenroom budget)
+    console.log(`belay — always-on goal loop for Claude Code (reads Keyoku goals + tokenroom budget)
 
 usage:
-  conductor install [--dry-run] [--config-dir <dir>]   register the Stop + PreToolUse hooks (additive; preserves existing hooks)
-  conductor uninstall [--config-dir <dir>]             remove only conductor's entries
-  conductor status                                     current focused goal + would-block verdict + counters
-  conductor doctor                                     keyoku layout self-check, tokenroom presence, hook registration, config validity
-  conductor hook <stop|pre-tool-use>                   (hook commands — wired by install)
+  belay install [--dry-run] [--config-dir <dir>]   register the Stop + PreToolUse hooks (additive; preserves existing hooks)
+  belay uninstall [--config-dir <dir>]             remove only belay's entries
+  belay status                                     current focused goal + would-block verdict + counters
+  belay doctor                                     keyoku layout self-check, tokenroom presence, hook registration, config validity
+  belay hook <stop|pre-tool-use>                   (hook commands — wired by install)
 
-Conductor continues work WITHIN a session and advises across sessions; it never launches
+Belay continues work WITHIN a session and advises across sessions; it never launches
 headless runs and never touches credentials.`);
 }

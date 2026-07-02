@@ -4,21 +4,21 @@ import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
-export const bin = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'conductor.mjs');
+export const bin = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'belay.mjs');
 export const nowSec = () => Math.round(Date.now() / 1000);
 export const iso = (sec) => new Date(sec * 1000).toISOString();
 
 /** Fresh isolated homes for every synthetic world. */
 export function homes() {
-  const base = mkdtempSync(join(tmpdir(), 'conductor-'));
-  return { base, keyoku: join(base, 'keyoku'), tokenroom: join(base, 'tokenroom'), conductor: join(base, 'conductor'), config: join(base, 'claude') };
+  const base = mkdtempSync(join(tmpdir(), 'belay-'));
+  return { base, keyoku: join(base, 'keyoku'), tokenroom: join(base, 'tokenroom'), belay: join(base, 'belay'), config: join(base, 'claude') };
 }
 
 export const env = (h) => ({
   ...process.env,
   KEYOKU_HOME: h.keyoku,
   TOKENROOM_DIR: h.tokenroom,
-  CONDUCTOR_DIR: h.conductor,
+  BELAY_DIR: h.belay,
   CLAUDE_CONFIG_DIR: h.config,
 });
 

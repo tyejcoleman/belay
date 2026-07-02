@@ -4,9 +4,9 @@ import { readKeyoku } from './keyoku.mjs';
 import { readBudget } from './budget.mjs';
 
 // PreToolUse policy gate (autonomy x budget x action-class). ONLY active while a
-// scope-matched focused AUTONOMOUS ACTIVE goal exists — conductor never polices normal
+// scope-matched focused AUTONOMOUS ACTIVE goal exists — belay never polices normal
 // interactive use (ADR-4). Irreversible/external actions route to the HUMAN via
-// permissionDecision "ask" (ADR-3: the human decides; conductor only makes sure the
+// permissionDecision "ask" (ADR-3: the human decides; belay only makes sure the
 // question gets asked). Everything unmatched exits silently.
 
 export const SPAWN_TOOLS = ['Task', 'Agent', 'Workflow'];
@@ -160,7 +160,7 @@ export function decideGate(p, k, budget, cfg) {
   if (hit) {
     return {
       decision: 'ask',
-      reason: `[conductor] '${hit.class}' action under autonomous goal — requires human approval (goal constraint policy)${hit.note ? ` — ${hit.note}` : ''}`,
+      reason: `[belay] '${hit.class}' action under autonomous goal — requires human approval (goal constraint policy)${hit.note ? ` — ${hit.note}` : ''}`,
     };
   }
 
@@ -172,7 +172,7 @@ export function decideGate(p, k, budget, cfg) {
     if (left != null && left < cfg.spawn_floor_pct && !budget.alt) {
       return {
         decision: 'ask',
-        reason: `[conductor] budget descent: no new subagents below ${cfg.spawn_floor_pct}% — do the work inline in small steps`,
+        reason: `[belay] budget descent: no new subagents below ${cfg.spawn_floor_pct}% — do the work inline in small steps`,
       };
     }
   }

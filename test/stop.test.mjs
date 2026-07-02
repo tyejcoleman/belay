@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { homes, run, goal, focusFor, obs, writeKeyoku, writeTokenroom, writeProfiles, stopPayload, nowSec, iso } from './helpers.mjs';
 
 // T1: every Stop-hook decision branch, spawning the real bin against synthetic
-// KEYOKU_HOME / TOKENROOM_DIR / CONDUCTOR_DIR fixtures.
+// KEYOKU_HOME / TOKENROOM_DIR / BELAY_DIR fixtures.
 
 const stop = (h, payload) => run(h, ['hook', 'stop'], payload ?? stopPayload());
 
@@ -17,17 +17,17 @@ test('focused autonomous goal + unmet + healthy budget → block JSON with unmet
   assert.equal(r.status, 0);
   const out = JSON.parse(r.stdout);
   assert.equal(out.decision, 'block');
-  assert.match(out.reason, /^\[conductor\] goal 'ship-widget' not converged — unmet: c1: tests green; c2: deployed to prod\./);
+  assert.match(out.reason, /^\[belay\] goal 'ship-widget' not converged — unmet: c1: tests green; c2: deployed to prod\./);
   assert.match(out.reason, /run goal_assess to verify \(never claim convergence without it\)/);
   assert.match(out.reason, /5h: 72% left\.$/);
 
   // the block incremented the per-(session,goal) counter, with owner-only perms
-  const st = JSON.parse(readFileSync(join(h.conductor, 'state.json'), 'utf8'));
+  const st = JSON.parse(readFileSync(join(h.belay, 'state.json'), 'utf8'));
   assert.equal(st.sessions.s1.continuations, 1);
   assert.equal(st.sessions.s1.goalId, 'goal_test1');
   if (process.platform !== 'win32') {
-    assert.equal(statSync(h.conductor).mode & 0o777, 0o700);
-    assert.equal(statSync(join(h.conductor, 'state.json')).mode & 0o777, 0o600);
+    assert.equal(statSync(h.belay).mode & 0o777, 0o700);
+    assert.equal(statSync(join(h.belay, 'state.json')).mode & 0o777, 0o600);
   }
 });
 
@@ -48,8 +48,8 @@ test('continuation loop is BOUNDED: a chain of mid-chain stops blocks up to max_
   const h = homes();
   writeKeyoku(h, { goals: [goal()], focus: focusFor(), obsLines: [obs()] });
   writeTokenroom(h, { leftPct: 72 });
-  mkdirSync(h.conductor, { recursive: true });
-  writeFileSync(join(h.conductor, 'config.json'), JSON.stringify({ max_continuations: 3 }));
+  mkdirSync(h.belay, { recursive: true });
+  writeFileSync(join(h.belay, 'config.json'), JSON.stringify({ max_continuations: 3 }));
 
   // fresh chain start resets the budget, then blocks (0→1)
   assert.equal(JSON.parse(stop(h).stdout).decision, 'block');
@@ -140,7 +140,7 @@ test('converged → allow with stderr one-liner; blocked/abandoned → silent al
     writeKeyoku(h, { goals: [goal({ status })], focus: focusFor(), obsLines: [obs()] });
     const rr = stop(h);
     assert.equal(rr.stdout, '');
-    assert.doesNotMatch(rr.stderr, /conductor/);
+    assert.doesNotMatch(rr.stderr, /belay/);
   }
 });
 
@@ -148,9 +148,9 @@ test('continuation counter exhaustion → allow with stderr note; counter resets
   const h = homes();
   writeKeyoku(h, { goals: [goal()], focus: focusFor(), obsLines: [obs()] });
   writeTokenroom(h);
-  mkdirSync(h.conductor, { recursive: true });
-  writeFileSync(join(h.conductor, 'state.json'), JSON.stringify({ sessions: { s1: { goalId: 'goal_test1', continuations: 25, staleBlocked: false, updated_at: nowSec() } } }));
-  // stop_hook_active:true is ignored by conductor now (ADR-6) — the counter is monotonic
+  mkdirSync(h.belay, { recursive: true });
+  writeFileSync(join(h.belay, 'state.json'), JSON.stringify({ sessions: { s1: { goalId: 'goal_test1', continuations: 25, staleBlocked: false, updated_at: nowSec() } } }));
+  // stop_hook_active:true is ignored by belay now (ADR-6) — the counter is monotonic
   const r = stop(h, stopPayload({ stop_hook_active: true }));
   assert.equal(r.stdout, '');
   assert.match(r.stderr, /continuation budget exhausted for goal 'ship-widget' \(25\/25 this session\) — allowing stop/);
@@ -160,7 +160,7 @@ test('continuation counter exhaustion → allow with stderr note; counter resets
   writeKeyoku(h, { goals: [g2], focus: focusFor({ goalId: 'goal_test2', goalSlug: 'other-goal' }), obsLines: [obs({ goalId: 'goal_test2' })] });
   const r2 = stop(h);
   assert.match(JSON.parse(r2.stdout).reason, /goal 'other-goal' not converged/);
-  assert.equal(JSON.parse(readFileSync(join(h.conductor, 'state.json'), 'utf8')).sessions.s1.continuations, 1);
+  assert.equal(JSON.parse(readFileSync(join(h.belay, 'state.json'), 'utf8')).sessions.s1.continuations, 1);
 });
 
 test('stale assessment → exactly one "run goal_assess" block, then allow', () => {
@@ -179,7 +179,7 @@ test('stale assessment → exactly one "run goal_assess" block, then allow', () 
   assert.match(second.stderr, /still stale after the one stale-block/);
 
   // the stale-block did NOT consume a continuation
-  assert.equal(JSON.parse(readFileSync(join(h.conductor, 'state.json'), 'utf8')).sessions.s1.continuations, 0);
+  assert.equal(JSON.parse(readFileSync(join(h.belay, 'state.json'), 'utf8')).sessions.s1.continuations, 0);
 });
 
 test('never-assessed goal (no lastAssessedAt, no observations) takes the stale path', () => {
@@ -310,7 +310,7 @@ test('torn trailing observation line is skipped; unmet ids without criteria fall
   assert.match(out.reason, /unmet: c1: tests green; c9\./);
 });
 
-test('corrupted focus.json / goals.json / conductor state / non-JSON stdin → silent allow, exit 0', () => {
+test('corrupted focus.json / goals.json / belay state / non-JSON stdin → silent allow, exit 0', () => {
   const badFocus = homes();
   writeKeyoku(badFocus, { goals: [goal()], focus: '{"goalId": broken' });
   const r1 = stop(badFocus);
@@ -326,8 +326,8 @@ test('corrupted focus.json / goals.json / conductor state / non-JSON stdin → s
   const badOwn = homes();
   writeKeyoku(badOwn, { goals: [goal()], focus: focusFor(), obsLines: [obs()] });
   writeTokenroom(badOwn);
-  mkdirSync(badOwn.conductor, { recursive: true });
-  writeFileSync(join(badOwn.conductor, 'state.json'), 'not json at all');
+  mkdirSync(badOwn.belay, { recursive: true });
+  writeFileSync(join(badOwn.belay, 'state.json'), 'not json at all');
   const r3 = stop(badOwn); // corrupted OWN state degrades to zero counters, still blocks
   assert.equal(r3.status, 0);
   assert.equal(JSON.parse(r3.stdout).decision, 'block');
@@ -356,7 +356,7 @@ test('fresh goal with NO readable assessment → one goal_assess-demanding block
   assert.match(second.stderr, /no readable assessment after the one goal_assess block/);
 
   // it consumed the one-shot guard, not a continuation
-  assert.equal(JSON.parse(readFileSync(join(h.conductor, 'state.json'), 'utf8')).sessions.s1.continuations, 0);
+  assert.equal(JSON.parse(readFileSync(join(h.belay, 'state.json'), 'utf8')).sessions.s1.continuations, 0);
 });
 
 test('block reason sanitizes injected criteria text and caps flood (ADR-7, finding 6)', () => {
@@ -386,8 +386,8 @@ test('config overrides: max_continuations and stale_assess_min honored; bad conf
   const h = homes();
   writeKeyoku(h, { goals: [goal()], focus: focusFor(), obsLines: [obs()] });
   writeTokenroom(h);
-  mkdirSync(h.conductor, { recursive: true });
-  writeFileSync(join(h.conductor, 'config.json'), JSON.stringify({ max_continuations: 1, stale_assess_min: 'sixty' }));
+  mkdirSync(h.belay, { recursive: true });
+  writeFileSync(join(h.belay, 'config.json'), JSON.stringify({ max_continuations: 1, stale_assess_min: 'sixty' }));
   assert.equal(JSON.parse(stop(h).stdout).decision, 'block'); // 0 → 1
   const r = stop(h, stopPayload({ stop_hook_active: true })); // 1 >= 1 → exhausted (flag ignored, ADR-6)
   assert.equal(r.stdout, '');

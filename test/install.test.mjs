@@ -27,7 +27,7 @@ function seeded() {
 
 const settingsOf = (h) => JSON.parse(readFileSync(join(h.config, 'settings.json'), 'utf8'));
 
-test('install is additive: every pre-existing hook (tokenroom included) survives; conductor entries land once', () => {
+test('install is additive: every pre-existing hook (tokenroom included) survives; belay entries land once', () => {
   const h = seeded();
   const r = run(h, ['install', '--config-dir', h.config]);
   assert.equal(r.status, 0);
@@ -41,14 +41,14 @@ test('install is additive: every pre-existing hook (tokenroom included) survives
   assert.deepEqual(s.hooks.UserPromptSubmit, TOKENROOM_STYLE_SETTINGS.hooks.UserPromptSubmit);
   assert.equal(s.hooks.PreToolUse[0].hooks[0].command, TOKENROOM_STYLE_SETTINGS.hooks.PreToolUse[0].hooks[0].command);
   assert.equal(s.hooks.Stop[0].hooks[0].command, 'some-other-tool --on-stop');
-  // conductor entries appended
+  // belay entries appended
   assert.equal(s.hooks.Stop.length, 2);
-  assert.match(s.hooks.Stop[1].hooks[0].command, /conductor\.mjs" hook stop/);
+  assert.match(s.hooks.Stop[1].hooks[0].command, /belay\.mjs" hook stop/);
   assert.equal(s.hooks.PreToolUse.length, 2);
-  assert.match(s.hooks.PreToolUse[1].hooks[0].command, /conductor\.mjs" hook pre-tool-use/);
+  assert.match(s.hooks.PreToolUse[1].hooks[0].command, /belay\.mjs" hook pre-tool-use/);
   assert.equal(s.hooks.PreToolUse[1].matcher, undefined); // gate sees all tools by design
   // backup written
-  assert.ok(existsSync(join(h.config, 'settings.json.conductor-bak')));
+  assert.ok(existsSync(join(h.config, 'settings.json.belay-bak')));
 });
 
 test('install is idempotent: second run replaces nothing and duplicates nothing', () => {
@@ -67,10 +67,10 @@ test('--dry-run changes nothing on disk', () => {
   const r = run(h, ['install', '--config-dir', h.config, '--dry-run']);
   assert.match(r.stdout, /\[dry-run\]/);
   assert.equal(readFileSync(join(h.config, 'settings.json'), 'utf8'), before);
-  assert.ok(!existsSync(join(h.config, 'settings.json.conductor-bak')));
+  assert.ok(!existsSync(join(h.config, 'settings.json.belay-bak')));
 });
 
-test('uninstall removes ONLY conductor entries and restores the seeded settings exactly', () => {
+test('uninstall removes ONLY belay entries and restores the seeded settings exactly', () => {
   const h = seeded();
   run(h, ['install', '--config-dir', h.config]);
   const r = run(h, ['uninstall', '--config-dir', h.config]);
@@ -91,9 +91,9 @@ test('install into an EMPTY config dir, then uninstall → hooks key fully gone 
 });
 
 test('npx cache paths are recognized as ephemeral (installer refuses them)', () => {
-  assert.equal(isEphemeralInstall('/Users/x/.npm/_npx/abc123/node_modules/conductor'), true);
-  assert.equal(isEphemeralInstall('C:\\Users\\x\\AppData\\_npx\\abc\\conductor'), true);
-  assert.equal(isEphemeralInstall('/Users/x/Development/conductor'), false);
+  assert.equal(isEphemeralInstall('/Users/x/.npm/_npx/abc123/node_modules/belay'), true);
+  assert.equal(isEphemeralInstall('C:\\Users\\x\\AppData\\_npx\\abc\\belay'), true);
+  assert.equal(isEphemeralInstall('/Users/x/Development/belay'), false);
 });
 
 test('doctor and status run clean (exit 0) against synthetic homes', () => {
@@ -105,5 +105,5 @@ test('doctor and status run clean (exit 0) against synthetic homes', () => {
   assert.match(d.stdout, /Stop hook NOT registered/);
   const s = run(h, ['status']);
   assert.equal(s.status, 0);
-  assert.match(s.stdout, /no focused goal — conductor idles/);
+  assert.match(s.stdout, /no focused goal — belay idles/);
 });

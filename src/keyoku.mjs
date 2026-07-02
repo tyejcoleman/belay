@@ -4,9 +4,9 @@ import { join } from 'node:path';
 import { readJSON, sanitizeText, sanitizeSlug } from './util.mjs';
 
 // Keyoku read contract (ADR-1: files, not processes — mapped 2026-07-01 against
-// keyoku 2.12.x source; pinned >=2.7 <3, layout self-checked by `conductor doctor`):
+// keyoku 2.12.x source; pinned >=2.7 <3, layout self-checked by `belay doctor`):
 //   $KEYOKU_HOME || ~/.keyoku
-//   paused                       marker file — present means conductor no-ops entirely
+//   paused                       marker file — present means belay no-ops entirely
 //   focus.json                   {goalId, goalSlug?, cwd?, sessionId?, at} — GLOBAL singleton
 //   goals.json                   array of goal rows (atomic whole-array writes)
 //   observations/<goalId>.jsonl  append-only; tail line ≈ {unmet:[ids], summary, at}
@@ -23,7 +23,7 @@ export const keyokuHome = () => process.env.KEYOKU_HOME || join(homedir(), '.key
  * otherwise a cwd pin matches ONLY when the SESSION's cwd is inside the focus subtree
  * (a === b || a startsWith b + '/') — ONE-WAY, on purpose.
  *
- * Keyoku attributes bidirectionally (either dir), but attribution is advisory; conductor
+ * Keyoku attributes bidirectionally (either dir), but attribution is advisory; belay
  * BLOCKS a stop, so it must be conservative. The dropped direction (focus.cwd inside the
  * SESSION cwd) is exactly the hole: a session running at an ANCESTOR of the goal's cwd
  * (an orchestrator at the repo root, or a shell at '/' or $HOME) would match every focus

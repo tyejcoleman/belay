@@ -1,14 +1,14 @@
 import { join } from 'node:path';
-import { conductorDir, ensureDir, atomicWriteJSON, readJSON } from './util.mjs';
+import { belayDir, ensureDir, atomicWriteJSON, readJSON } from './util.mjs';
 
-// Conductor's OWN state: ~/.conductor/state.json — one tiny counter record per session.
+// Belay's OWN state: ~/.belay/state.json — one tiny counter record per session.
 //   { sessions: { <session_id>: { goalId, continuations, staleBlocked, updated_at } } }
 // continuations = how many times the Stop hook has blocked (continued) this session on
 // this goal; staleBlocked = whether the single "run goal_assess first" block was spent.
 // Both reset when the session's focused goalId changes. Entries self-prune after 7 days.
 
 const PRUNE_SEC = 7 * 86400;
-const statePath = () => join(conductorDir(), 'state.json');
+const statePath = () => join(belayDir(), 'state.json');
 
 export function readOwnState() {
   const s = readJSON(statePath());
@@ -35,6 +35,6 @@ export function saveSessionEntry(state, sessionId, entry, nowSec = Date.now() / 
     if (!e || typeof e !== 'object' || nowSec - (typeof e.updated_at === 'number' ? e.updated_at : 0) > PRUNE_SEC) delete state.sessions[k];
   }
   state.sessions[sessionId || 'unknown'] = { ...entry, updated_at: nowSec };
-  ensureDir(conductorDir());
+  ensureDir(belayDir());
   atomicWriteJSON(statePath(), state);
 }

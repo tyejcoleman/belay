@@ -6,7 +6,7 @@ import { readOwnState, sessionEntry, saveSessionEntry } from './state.mjs';
 // The Stop hook: hold the session open while the focused Keyoku goal is unconverged,
 // the goal is AUTONOMOUS (ADR-2: observe/suggest/approve all imply a human in the loop),
 // and budget allows. Everything else — including every parse failure — allows the stop
-// silently: conductor must be a no-op for normal interactive use (ADR-4).
+// silently: belay must be a no-op for normal interactive use (ADR-4).
 
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
@@ -27,7 +27,7 @@ export function budgetLine(b, cfg) {
 }
 
 /**
- * Pure decision (also driven by `conductor status` for the would-block verdict).
+ * Pure decision (also driven by `belay status` for the would-block verdict).
  * Returns { action: 'allow'|'block', kind, reason?, note?, save?, entry? } —
  * `note` goes to stderr (observability, never harness-visible context), `reason`
  * to stdout as the block JSON, `entry` is the mutated counter record to persist.
@@ -37,7 +37,7 @@ export function decideStop(p, k, budget, cfg, entry, nowSec = Date.now() / 1000)
   // capped the loop at ONE forced continuation per turn (making max_continuations
   // unreachable) and let the one-shot stale-block consume it. We deliberately do NOT reset
   // counters on the flag either: termination must not depend on the harness ever setting
-  // stop_hook_active (ADR-4 — never wedge a session). Instead conductor's OWN monotonic,
+  // stop_hook_active (ADR-4 — never wedge a session). Instead belay's OWN monotonic,
   // durable per-(session, goal) continuation budget bounds the loop deterministically for
   // ANY sequence of stops — see the ADR-6 termination argument. Every stop is now
   // evaluated; stop_hook_active is not consulted here.
@@ -49,7 +49,7 @@ export function decideStop(p, k, budget, cfg, entry, nowSec = Date.now() / 1000)
 
   const g = k.goal;
   const slug = sanitizeSlug(goalSlug(g, k.focus)); // slug lands in a model-visible reason (ADR-7)
-  if (g.status === 'converged') return { action: 'allow', kind: 'converged', note: `[conductor] goal '${slug}' converged — nothing to hold` };
+  if (g.status === 'converged') return { action: 'allow', kind: 'converged', note: `[belay] goal '${slug}' converged — nothing to hold` };
   if (g.status !== 'active') return { action: 'allow', kind: `goal-${g.status}` }; // blocked / abandoned / anything future
   if (g.autonomy !== 'autonomous') return { action: 'allow', kind: 'not-autonomous' }; // ADR-2
 
@@ -58,7 +58,7 @@ export function decideStop(p, k, budget, cfg, entry, nowSec = Date.now() / 1000)
   const used = num(g.usedIterations);
   const max = num(g.maxIterations);
   if (used != null && max != null && max > 0 && used >= max) {
-    return { action: 'allow', kind: 'iterations-exhausted', note: `[conductor] goal '${slug}': keyoku iteration budget exhausted (${used}/${max}) — allowing stop` };
+    return { action: 'allow', kind: 'iterations-exhausted', note: `[belay] goal '${slug}': keyoku iteration budget exhausted (${used}/${max}) — allowing stop` };
   }
 
   // Quota-dead with no fresh alternate profile is the ONE legit stop (descent).
@@ -66,7 +66,7 @@ export function decideStop(p, k, budget, cfg, entry, nowSec = Date.now() / 1000)
     return {
       action: 'allow',
       kind: 'budget-floor',
-      note: `[conductor] goal '${slug}' unconverged, but the 5h window is below the ${cfg.budget_floor_pct}% floor (${Math.round(budget.left_pct)}% left${budget.resets_at ? `, resets ${fmtClock(budget.resets_at)}` : ''}) with no fresh alternate profile — allowing stop (descent)`,
+      note: `[belay] goal '${slug}' unconverged, but the 5h window is below the ${cfg.budget_floor_pct}% floor (${Math.round(budget.left_pct)}% left${budget.resets_at ? `, resets ${fmtClock(budget.resets_at)}` : ''}) with no fresh alternate profile — allowing stop (descent)`,
     };
   }
 
@@ -76,14 +76,14 @@ export function decideStop(p, k, budget, cfg, entry, nowSec = Date.now() / 1000)
   const freshAt = freshCandidates.length ? Math.max(...freshCandidates) : null;
   const stale = freshAt == null || nowSec - freshAt > cfg.stale_assess_min * 60;
   if (stale) {
-    if (entry.staleBlocked) return { action: 'allow', kind: 'stale-spent', note: `[conductor] goal '${slug}' state still stale after the one stale-block — allowing stop` };
+    if (entry.staleBlocked) return { action: 'allow', kind: 'stale-spent', note: `[belay] goal '${slug}' state still stale after the one stale-block — allowing stop` };
     const age = freshAt == null ? 'never assessed' : `last assessed ${Math.round((nowSec - freshAt) / 60)}m ago`;
     return {
       action: 'block',
       kind: 'stale-block',
       save: true,
       entry: { ...entry, staleBlocked: true },
-      reason: capReason(`[conductor] goal '${slug}' state is stale (${age}) — run goal_assess first to get ground truth, then act on the fresh verdict (never claim convergence without it).`),
+      reason: capReason(`[belay] goal '${slug}' state is stale (${age}) — run goal_assess first to get ground truth, then act on the fresh verdict (never claim convergence without it).`),
     };
   }
 
@@ -95,14 +95,14 @@ export function decideStop(p, k, budget, cfg, entry, nowSec = Date.now() / 1000)
   // goal_assess, reusing the one-shot staleBlocked guard so it can't loop (ADR-7 flow).
   if (unmet == null) {
     if (entry.staleBlocked) {
-      return { action: 'allow', kind: 'unmet-unknown-spent', note: `[conductor] goal '${slug}' still has no readable assessment after the one goal_assess block — allowing stop` };
+      return { action: 'allow', kind: 'unmet-unknown-spent', note: `[belay] goal '${slug}' still has no readable assessment after the one goal_assess block — allowing stop` };
     }
     return {
       action: 'block',
       kind: 'unmet-unknown',
       save: true,
       entry: { ...entry, staleBlocked: true },
-      reason: capReason(`[conductor] goal '${slug}' has no readable assessment observation — run goal_assess to get ground truth before stopping (never claim convergence without it).` + budgetLine(budget, cfg)),
+      reason: capReason(`[belay] goal '${slug}' has no readable assessment observation — run goal_assess to get ground truth before stopping (never claim convergence without it).` + budgetLine(budget, cfg)),
     };
   }
   if (unmet.length === 0) return { action: 'allow', kind: 'nothing-unmet' }; // fresh and nothing unmet → nothing to hold
@@ -112,7 +112,7 @@ export function decideStop(p, k, budget, cfg, entry, nowSec = Date.now() / 1000)
     return {
       action: 'allow',
       kind: 'continuations-exhausted',
-      note: `[conductor] continuation budget exhausted for goal '${slug}' (${entry.continuations}/${cfg.max_continuations} this session) — allowing stop`,
+      note: `[belay] continuation budget exhausted for goal '${slug}' (${entry.continuations}/${cfg.max_continuations} this session) — allowing stop`,
     };
   }
 
@@ -125,7 +125,7 @@ export function decideStop(p, k, budget, cfg, entry, nowSec = Date.now() / 1000)
     save: true,
     entry: { ...entry, continuations: entry.continuations + 1 },
     reason: capReason(
-      `[conductor] goal '${slug}' not converged — unmet: ${unmetStr}. ` +
+      `[belay] goal '${slug}' not converged — unmet: ${unmetStr}. ` +
         `Continue working toward these criteria; when you believe one now passes, run goal_assess to verify (never claim convergence without it).` +
         budgetLine(budget, cfg)
     ),

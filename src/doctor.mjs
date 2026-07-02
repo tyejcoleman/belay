@@ -1,11 +1,11 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
-import { readJSON, readConfig, tokenroomDir, conductorDir } from './util.mjs';
+import { readJSON, readConfig, tokenroomDir, belayDir } from './util.mjs';
 import { keyokuHome, tailObservation, scopeMatch } from './keyoku.mjs';
 import { configDir, MARK } from './install.mjs';
 
-// `conductor doctor` — the ADR-1 counterweight: we code against keyoku's FILES, not its
+// `belay doctor` — the ADR-1 counterweight: we code against keyoku's FILES, not its
 // process, so we ship a layout self-check that verifies the contract still holds on this
 // machine (keyoku's store layer reserves a future SQLite swap; this is where that breaks
 // loudly instead of silently no-opping forever).
@@ -56,12 +56,12 @@ export function doctor() {
 
   // ── keyoku layout self-check ──
   const home = keyokuHome();
-  console.log(`conductor doctor\n\nkeyoku (${home})`);
+  console.log(`belay doctor\n\nkeyoku (${home})`);
   if (!existsSync(home)) {
-    say('warn', 'keyoku home not found — conductor idles (no goals to hold)');
+    say('warn', 'keyoku home not found — belay idles (no goals to hold)');
   } else {
     say('ok', 'home exists');
-    if (existsSync(join(home, 'paused'))) say('warn', "'paused' marker present — conductor is a no-op until it is removed");
+    if (existsSync(join(home, 'paused'))) say('warn', "'paused' marker present — belay is a no-op until it is removed");
 
     const goalsRaw = (() => {
       try {
@@ -79,7 +79,7 @@ export function doctor() {
         if (bad.length) say('FAIL', `goals.json: ${bad.length}/${goals.length} rows missing id/status/autonomy/criteria — layout contract broken`);
         else say('ok', `goals.json: ${goals.length} goals, all rows carry id/status/autonomy/criteria`);
         const focus = readJSON(join(home, 'focus.json'));
-        if (!existsSync(join(home, 'focus.json'))) say('ok', 'no focus.json — nothing focused, conductor idles');
+        if (!existsSync(join(home, 'focus.json'))) say('ok', 'no focus.json — nothing focused, belay idles');
         else if (!focus || typeof focus.goalId !== 'string') say('FAIL', 'focus.json present but unreadable/missing goalId — treated as no focus');
         else {
           const g = goals.find((x) => x && x.id === focus.goalId);
@@ -91,7 +91,7 @@ export function doctor() {
             const obs = tailObservation(join(home, 'observations', `${focus.goalId}.jsonl`));
             if (!obs) {
               const freshAssess = typeof g.lastAssessedAt === 'string' && Date.parse(g.lastAssessedAt) > Date.now() - 60 * 60 * 1000;
-              say('warn', `observations/${focus.goalId}.jsonl has no parseable line with an unmet[] — conductor will ${freshAssess ? 'block ONCE demanding goal_assess (unmet-unknown), lastAssessedAt is still fresh' : 'take the stale-assess path (lastAssessedAt stale/absent)'}`);
+              say('warn', `observations/${focus.goalId}.jsonl has no parseable line with an unmet[] — belay will ${freshAssess ? 'block ONCE demanding goal_assess (unmet-unknown), lastAssessedAt is still fresh' : 'take the stale-assess path (lastAssessedAt stale/absent)'}`);
             } else say('ok', `observation tail parses (unmet: ${Array.isArray(obs.unmet) ? JSON.stringify(obs.unmet) : 'absent'}, at ${obs.at ?? '?'})`);
           }
         }
@@ -106,7 +106,7 @@ export function doctor() {
       const v = parseVersion(kv.version);
       const inRange = v && v[0] < KEYOKU_RANGE.maxExclusive && (v[0] > KEYOKU_RANGE.min[0] || (v[0] === KEYOKU_RANGE.min[0] && v[1] >= KEYOKU_RANGE.min[1]));
       if (inRange) say('ok', `keyoku ${kv.version} (${kv.path}) — inside the pinned range >=2.7 <3`);
-      else say('warn', `keyoku ${kv.version} is OUTSIDE the pinned range >=2.7 <3 — the file-layout contract may not hold; re-verify before trusting conductor`);
+      else say('warn', `keyoku ${kv.version} is OUTSIDE the pinned range >=2.7 <3 — the file-layout contract may not hold; re-verify before trusting belay`);
     }
   }
 
@@ -129,13 +129,13 @@ export function doctor() {
   for (const event of ['Stop', 'PreToolUse']) {
     const entries = Array.isArray(settings?.hooks?.[event]) ? settings.hooks[event] : [];
     const present = entries.some((m) => (m?.hooks ?? []).some((h) => typeof h?.command === 'string' && h.command.includes(MARK)));
-    say(present ? 'ok' : 'warn', `${event} hook ${present ? 'registered' : 'NOT registered — run `conductor install`'}`);
+    say(present ? 'ok' : 'warn', `${event} hook ${present ? 'registered' : 'NOT registered — run `belay install`'}`);
   }
 
   // ── config ──
-  console.log(lines.splice(0).join('\n') + `\n\nconfig (${join(conductorDir(), 'config.json')})`);
+  console.log(lines.splice(0).join('\n') + `\n\nconfig (${join(belayDir(), 'config.json')})`);
   const { warnings } = readConfig();
-  if (!existsSync(join(conductorDir(), 'config.json'))) say('ok', 'no config.json — running on defaults');
+  if (!existsSync(join(belayDir(), 'config.json'))) say('ok', 'no config.json — running on defaults');
   else if (warnings.length) for (const w of warnings) say('warn', w);
   else say('ok', 'config valid');
   console.log(lines.splice(0).join('\n'));
