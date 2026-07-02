@@ -58,6 +58,12 @@ export function status() {
     const unmet = unmetDetail(g, k.obs);
     console.log(`    unmet: ${unmet == null ? 'unknown (no assessment observation)' : unmet.length ? unmet.join('; ') : 'none'}`);
     console.log(`    last observation at: ${k.obs?.at ?? 'never'}${g.lastAssessedAt ? ` · lastAssessedAt: ${g.lastAssessedAt}` : ''}`);
+    // An unpinned focus of an active autonomous goal ropes ANY session inside its cwd
+    // subtree (keyoku.mjs scopeMatch's documented residual hole — it conscripted the
+    // orchestrator session live on 2026-07-02). Surface it wherever the human looks.
+    if (g.status === 'active' && g.autonomy === 'autonomous' && !(typeof k.focus.sessionId === 'string' && k.focus.sessionId)) {
+      console.log(`    warning: focus has no sessionId pin — any session under '${sanitizeText(String(k.focus.cwd ?? ''), 80) || '(any cwd)'}' can be roped by the Stop hold (pass sessionId to goal_focus, or arm via belay_loop_create)`);
+    }
     // Loop arm/pause provenance (loops.json — belay's own file). Arming is provenance +
     // counter reset, not a precondition: the Stop hold applies to any focused active
     // autonomous goal regardless (docs/DESIGN.md §3.2).

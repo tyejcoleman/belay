@@ -1,4 +1,6 @@
-import { readStdin, readConfig, fmtClock, toEpochSec, sanitizeSlug, capReason } from './util.mjs';
+import { appendFileSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { readStdin, readConfig, fmtClock, toEpochSec, sanitizeSlug, capReason, belayDir, ensureDir } from './util.mjs';
 import { readKeyoku, goalSlug, unmetDetail } from './keyoku.mjs';
 import { readBudget } from './budget.mjs';
 import { readOwnState, sessionEntry, saveSessionEntry } from './state.mjs';
@@ -146,6 +148,36 @@ export function decideStop(p, k, budget, cfg, entry, nowSec = Date.now() / 1000,
   };
 }
 
+/** Append-only Stop-decision journal (~/.belay/decisions.jsonl): one line per evaluated
+ *  stop, INCLUDING silent allows — a stop that should have blocked but didn't is otherwise
+ *  undiagnosable after the fact (the 2026-07-02 unexplained allow). Self-capping: rewritten
+ *  to the newest half at ~512KB. Observability only — must never wedge a stop (ADR-4). */
+export function journalStop(payload, kind, action, goalId = null) {
+  try {
+    ensureDir(belayDir());
+    const path = join(belayDir(), 'decisions.jsonl');
+    try {
+      if (statSync(path).size > 512 * 1024) {
+        const lines = readFileSync(path, 'utf8').split('\n');
+        writeFileSync(path, lines.slice(Math.floor(lines.length / 2)).join('\n'), { mode: 0o600 });
+      }
+    } catch {
+      // no journal yet — the append below creates it
+    }
+    const line = {
+      at: new Date().toISOString(),
+      session_id: typeof payload.session_id === 'string' ? payload.session_id.slice(0, 8) : null,
+      cwd: typeof payload.cwd === 'string' ? payload.cwd : null,
+      goal: typeof goalId === 'string' ? goalId : null,
+      action,
+      kind,
+    };
+    appendFileSync(path, JSON.stringify(line) + '\n', { mode: 0o600 });
+  } catch {
+    // ANY error = skip the journal line, never the stop decision
+  }
+}
+
 export async function hookStop() {
   const p = await readStdin();
   // bin already wraps hooks in a choke-point try/catch; this inner one keeps the
@@ -155,13 +187,18 @@ export async function hookStop() {
     // so the continuation budget can accumulate and eventually allow. decideStop resets
     // the budget on a FRESH chain and bounds it on mid-chain stops.
     const k = readKeyoku({ sessionId: p.session_id, cwd: p.cwd });
-    if (!k.present || k.paused || !k.focus || !k.matched || !k.goal) return;
+    if (!k.present || k.paused || !k.focus || !k.matched || !k.goal) {
+      const kind = !k.present ? 'keyoku-absent' : k.paused ? 'paused' : !k.focus ? 'no-focus' : !k.matched ? 'scope-mismatch' : 'goal-missing';
+      journalStop(p, kind, 'allow', k.focus?.goalId ?? null);
+      return;
+    }
     const { cfg } = readConfig();
     const own = readOwnState();
     const entry = sessionEntry(own, p.session_id, k.goal.id);
     const budget = readBudget(p.session_id);
     const d = decideStop(p, k, budget, cfg, entry);
     if (d.save && d.entry) saveSessionEntry(own, p.session_id, d.entry);
+    journalStop(p, d.kind, d.action, k.goal.id);
     if (d.note) process.stderr.write(d.note + '\n');
     if (d.action === 'block') process.stdout.write(JSON.stringify({ decision: 'block', reason: d.reason }));
   } catch {
