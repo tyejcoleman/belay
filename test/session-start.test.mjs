@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { homes, run, goal, focusFor, writeKeyoku, writeResume, nowSec } from './helpers.mjs';
+import { homes, run, goal, focusFor, writeKeyoku, writeResume, writeRipe } from './helpers.mjs';
 
 // T2: `belay hook session-start` — the morning briefing (DESIGN §4.2, ADR-11).
 // Spawn-based against hermetic homes: zero open proposals → ZERO output; open proposals →
@@ -77,6 +77,18 @@ test('whole block ≤1.5KB and single-line under a hostile flood; injection text
   assert.ok(Buffer.byteLength(ctx, 'utf8') <= MAX_CONTEXT_BYTES + 3, `capped (got ${Buffer.byteLength(ctx, 'utf8')} bytes)`); // +3: the … cap marker is multi-byte
   // eslint-disable-next-line no-control-regex
   assert.ok(!/[\u0000-\u001f\u007f]/.test(ctx), 'no control chars / newlines in the injected context');
+});
+
+test('flood cap is BYTE-true: multibyte (CJK) proposal text stays <=1.5KB (L3-1)', () => {
+  const h = homes();
+  const cjk = '確認事項の要約テキストと補足の説明文'.repeat(20); // sanitized to ~200 code units ≈ 600 bytes/line
+  writeResume(h, { summary: cjk, resumeAtAgoSec: 60 });
+  writeRipe(h, [{ goalId: 'g1', reason: cjk }, { goalId: 'g2', reason: '別件' + cjk }]);
+  const r = hook(h);
+  assert.equal(r.status, 0);
+  const ctx = contextOf(r);
+  assert.ok(ctx.length < Buffer.byteLength(ctx, 'utf8'), 'the surfaced text really is multibyte (code units < bytes)');
+  assert.ok(Buffer.byteLength(ctx, 'utf8') <= MAX_CONTEXT_BYTES, `byte-capped (got ${Buffer.byteLength(ctx, 'utf8')} bytes)`);
 });
 
 test('dismissal sticks across sessions: dismissed proposals are never re-surfaced', () => {

@@ -82,9 +82,19 @@ export function sanitizeSlug(s, max = 64) {
   return t || 'unknown';
 }
 
-/** Hard cap the whole reason string (belt-and-suspenders against context flooding). */
+/** Hard cap the whole reason string in UTF-8 BYTES (belt-and-suspenders against context
+ *  flooding). Refute L3-1: the documented budgets (1.5KB additionalContext, ~2KB reason)
+ *  are byte budgets, but the old cap counted UTF-16 code units — 200 CJK code units are
+ *  600-800 bytes, so multibyte file-controlled input sailed past the cap untouched.
+ *  Slices on a code-point boundary and reserves 3 bytes for the '…' marker, so the
+ *  result is always <= max bytes. */
 export function capReason(s, max = 2048) {
-  return typeof s === 'string' && s.length > max ? s.slice(0, max - 1) + '…' : s;
+  if (typeof s !== 'string' || Buffer.byteLength(s, 'utf8') <= max) return s;
+  let t = Buffer.from(s, 'utf8')
+    .subarray(0, Math.max(0, max - 3))
+    .toString('utf8');
+  t = t.replace(/�+$/, ''); // a split trailing code point decodes as replacement chars — drop them
+  return t + '…';
 }
 
 export function fmtClock(sec) {
