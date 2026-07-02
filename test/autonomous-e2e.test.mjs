@@ -24,7 +24,10 @@ const AUTONOMOUS_GOAL = (over = {}) =>
       { id: 'c1', description: 'unit tests green' },
       { id: 'c2', description: 'deployed to staging' },
     ],
-    lastAssessedAt: iso(nowSec() - 60),
+    // matches the helpers obs() default at (now-120): real keyoku appends the observation
+    // AFTER saving lastAssessedAt, so a tail OLDER than the assess is the L1-2 anomaly —
+    // not a healthy world this proof should seed.
+    lastAssessedAt: iso(nowSec() - 120),
     ...over,
   });
 const FOCUS = () => focusFor({ goalId: 'goal_ship', goalSlug: 'ship-feature', sessionId: 's1', cwd: '/tmp/proj' });
