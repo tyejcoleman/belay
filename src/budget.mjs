@@ -1,3 +1,4 @@
+import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { readJSON, clampPct, toEpochSec, tokenroomDir } from './util.mjs';
 
@@ -15,15 +16,34 @@ const STALE_SEC = 30 * 60;
 
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
-/** The session's own account dir when the map knows it, else the legacy top-level dir. */
+/** Account bucket dirs under accounts/ (tokenroom convention: keys start with 'a'). */
+function listAccountKeys(root) {
+  try {
+    return readdirSync(join(root, 'accounts')).filter((n) => n.startsWith('a'));
+  } catch {
+    return [];
+  }
+}
+
+/** tokenroom quotaScope mirror (refute L4-1): mapped → that account. Unmapped but exactly
+ *  ONE account exists → that one (a single-account user keeps the figures even before the
+ *  map is written). No accounts → the legacy top-level layout. ≥2 accounts and unmapped →
+ *  `show:false` — the top-level pointer is last-writer-wins across accounts, so we cannot
+ *  tell which account is this session's and showing the wrong one is the bug (tokenroom
+ *  src/util.mjs quotaScope, verbatim posture: wrong-account numbers are worse than none).
+ *  The withheld figures previously drove the Stop hook's budget-floor/thin wording and the
+ *  spawn gate with ANOTHER account's numbers presented as attributed. */
 function stateDirFor(root, sessionId, nowSec) {
   const map = readJSON(join(root, 'sessions.json'));
   const e = map && typeof map === 'object' && sessionId ? map[sessionId] : null;
   if (e && typeof e === 'object' && typeof e.key === 'string' && e.key && nowSec - (num(e.at) ?? 0) <= STALE_SEC) {
     const dir = join(root, 'accounts', e.key);
-    if (readJSON(join(dir, 'state.json'))) return { dir, key: e.key };
+    if (readJSON(join(dir, 'state.json'))) return { dir, key: e.key, show: true };
   }
-  return { dir: root, key: null };
+  const keys = listAccountKeys(root);
+  if (keys.length === 1) return { dir: join(root, 'accounts', keys[0]), key: keys[0], show: true };
+  if (keys.length === 0) return { dir: root, key: null, show: true };
+  return { dir: root, key: null, show: false };
 }
 
 // tokenroom's REAL profiles.json (src/accounts.mjs writeProfiles/updateProfileSnapshot,
@@ -85,11 +105,19 @@ function pickAltProfile(root, currentKey, currentLeft, nowSec) {
  *   stale           state exists but is >30min old (or written before a passed reset)
  *   last_known_left the stale reading, for conservative spawn gating only
  *   alt             {label, left_pct} — a known-fresh better profile, or null
+ *   withheld        true = unmapped session on a ≥2-account machine: every quota figure
+ *                   is deliberately UNKNOWN (quotaScope mirror above) — `alt` survives
+ *                   because it names its own profile and cannot be mis-attributed
  */
 export function readBudget(sessionId, nowSec = Date.now() / 1000) {
   const root = tokenroomDir();
-  const out = { known: false, left_pct: null, resets_at: null, est_tokens_left: null, stale: false, last_known_left: null, alt: null };
-  const { dir, key } = stateDirFor(root, sessionId, nowSec);
+  const out = { known: false, left_pct: null, resets_at: null, est_tokens_left: null, stale: false, last_known_left: null, alt: null, withheld: false };
+  const { dir, key, show } = stateDirFor(root, sessionId, nowSec);
+  if (!show) {
+    out.withheld = true;
+    out.alt = pickAltProfile(root, key, null, nowSec);
+    return out;
+  }
   const s = readJSON(join(dir, 'state.json'));
   if (s && typeof s === 'object') {
     const updated = num(s.updated_at);

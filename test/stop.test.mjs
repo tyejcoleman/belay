@@ -227,6 +227,34 @@ test('budget below floor: no alt → allow stop (descent); fresh alt → keep bl
   assert.equal(stop(staleAlt).stdout, '');
 });
 
+test('quotaScope withhold (L4-1): unmapped session on a 2-account machine never acts on the top-level pointer', () => {
+  // Refute repro: the top-level pointer (last-writer-wins across accounts) says 2% left —
+  // ANOTHER account's number. An unmapped session used to take the budget-floor release
+  // on it; withheld = UNKNOWN = permissive → the hold must STAND.
+  const h = homes();
+  writeKeyoku(h, { goals: [goal()], focus: focusFor(), obsLines: [obs()] });
+  writeTokenroom(h, { leftPct: 2 }); // wrong-account pointer, below the 3% floor
+  for (const [key, left] of [['aAAA', 90], ['aBBB', 2]]) {
+    mkdirSync(join(h.tokenroom, 'accounts', key), { recursive: true });
+    writeFileSync(
+      join(h.tokenroom, 'accounts', key, 'state.json'),
+      JSON.stringify({ updated_at: nowSec() - 30, windows: { five_hour: { used_pct: 100 - left, resets_at: nowSec() + 3600 } } })
+    );
+  }
+  writeFileSync(join(h.tokenroom, 'sessions.json'), JSON.stringify({ other1: { key: 'aAAA', at: nowSec() - 60 }, other2: { key: 'aBBB', at: nowSec() - 60 } }));
+
+  const r = stop(h, stopPayload({ session_id: 'sid-unmapped' }));
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.decision, 'block'); // UNKNOWN budget is permissive for stops — no wrong-account release
+  assert.doesNotMatch(out.reason, /% left/); // and no wrong-account figure in the reason
+
+  // the MAPPED session still gets its own account's release when genuinely quota-dead
+  writeFileSync(join(h.tokenroom, 'sessions.json'), JSON.stringify({ s1: { key: 'aBBB', at: nowSec() - 30 } }));
+  const own = stop(h, stopPayload({ session_id: 's1' }));
+  assert.equal(own.stdout, '');
+  assert.match(own.stderr, /below the 3% floor \(2% left/);
+});
+
 test("alt profile parses tokenroom's REAL profiles.json shape (keys + last_windows_snapshot)", () => {
   // The exact shape tokenroom writes (src/accounts.mjs) — written LITERALLY here so the
   // contract is pinned independent of the test helper.

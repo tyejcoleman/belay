@@ -337,6 +337,36 @@ test('belay_status: unpinned focus + no session_id → counters UNATTRIBUTED and
   }
 });
 
+test('belay_status: session_id given but UNMAPPED on a 2-account machine → quota withheld, never the top-level pointer (L4-1)', async () => {
+  const h = homes();
+  // the exact refute repro: aAAA has 90% left, aBBB 4%; the top-level pointer was last
+  // written by aBBB — an unmapped session used to be served aBBB's 4% as its own.
+  writeKeyoku(h, { goals: [goal()], focus: focusFor(), obsLines: [obs()] });
+  writeTokenroom(h, { leftPct: 4 }); // the wrong-account top-level pointer
+  writeAccountState(h, 'aAAA', { leftPct: 90 });
+  writeAccountState(h, 'aBBB', { leftPct: 4 });
+  writeSessions(h, { other1: { key: 'aAAA', at: nowSec() - 60 }, other2: { key: 'aBBB', at: nowSec() - 60 } });
+
+  const s = mcpSession(h);
+  try {
+    const st = await callTool(s, 'belay_status', { session_id: 'sid-unmapped', cwd: '/tmp/proj' });
+    assert.equal(st.budget.known, false);
+    assert.equal(st.budget.left_pct, null);
+    assert.equal(st.budget.last_known_left, null);
+    assert.equal(st.budget.withheld, true);
+    assert.match(st.budget.attribution, /quota withheld/);
+    assert.doesNotMatch(st.verdict.reason ?? '', /% left/); // no wrong-account figure anywhere
+
+    // the mapped session still gets ITS OWN account's figures
+    writeSessions(h, { 'sid-mapped': { key: 'aAAA', at: nowSec() - 30 } });
+    const mine = await callTool(s, 'belay_status', { session_id: 'sid-mapped', cwd: '/tmp/proj' });
+    assert.equal(mine.budget.known, true);
+    assert.equal(mine.budget.left_pct, 90);
+  } finally {
+    await s.close();
+  }
+});
+
 // ── belay_loop_list: goals × focus × loops × counters (T3) ────────────────────────────
 
 test('belay_loop_list: focused, armed/paused, armable, and stale-converged rows compose; human-gated and fresh-converged goals are excluded', async () => {

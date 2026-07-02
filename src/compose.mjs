@@ -55,11 +55,19 @@ function activeAccounts(nowSec) {
 }
 
 function attributedBudget(sessionId, nowSec) {
-  if (sessionId) return { ...readBudget(sessionId, nowSec), attribution: null };
+  if (sessionId) {
+    const b = readBudget(sessionId, nowSec);
+    return {
+      ...b,
+      attribution: b.withheld
+        ? 'unmapped session on a multi-account machine — quota withheld (the top-level pointer is last-writer-wins across accounts; wrong-account numbers are worse than none); figures return once tokenroom maps this session'
+        : null,
+    };
+  }
   const active = activeAccounts(nowSec);
   if (active.size >= 2) {
     const b = readBudget(undefined, nowSec); // for `alt` only — every quota figure is withheld
-    return { known: false, left_pct: null, resets_at: null, est_tokens_left: null, stale: false, last_known_left: null, alt: b.alt, attribution: AMBIGUOUS };
+    return { known: false, left_pct: null, resets_at: null, est_tokens_left: null, stale: false, last_known_left: null, alt: b.alt, withheld: true, attribution: AMBIGUOUS };
   }
   if (active.size === 1) return { ...readBudget(active.values().next().value.sid, nowSec), attribution: null };
   return { ...readBudget(undefined, nowSec), attribution: null }; // no active accounts → legacy top-level pointer

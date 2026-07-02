@@ -85,6 +85,8 @@ export function status() {
 
   if (budget.known) {
     console.log(`  budget: 5h ${Math.round(budget.left_pct)}% left${budget.resets_at ? `, resets ${fmtClock(budget.resets_at)}` : ''}${budget.est_tokens_left != null ? ` (≈${Math.round(budget.est_tokens_left / 1000)}k tokens)` : ''}`);
+  } else if (budget.withheld) {
+    console.log('  budget: WITHHELD (unmapped session on a multi-account machine — wrong-account numbers are worse than none)');
   } else if (budget.stale) {
     console.log(`  budget: UNKNOWN (tokenroom state stale; last known ${Math.round(budget.last_known_left)}% left)`);
   } else {
