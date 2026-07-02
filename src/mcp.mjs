@@ -19,6 +19,12 @@
 //     belay_propose      → propose.mjs  scan() / dismiss(id)
 // - Every string that re-enters model-visible text passes the ADR-7 sanitizers.
 
+import { createInterface } from 'node:readline';
+import { sanitizeText } from './util.mjs';
+import { buildStatus, buildLoopList } from './compose.mjs';
+import { loopCreate, loopPause, loopResume, loopDisarm } from './loops.mjs';
+import { scan, dismiss } from './propose.mjs';
+
 export const PROTOCOL_VERSION = '2025-06-18';
 export const SERVER_INFO = { name: 'belay', version: '0.1.0' };
 
@@ -109,7 +115,32 @@ export const TOOLS = [
   },
 ];
 
-const notImplemented = (fn) => Object.assign(new Error(`belay: ${fn} not implemented (round-0 stub — see docs/DESIGN.md)`), { code: 'ERR_NOT_IMPLEMENTED' });
+/** The frozen handler wiring map (header above). Async so a synchronous handler throw
+ *  becomes a rejection the caller's catch turns into a JSON-RPC error (ADR-4). */
+async function dispatch(name, args) {
+  switch (name) {
+    case 'belay_status':
+      return buildStatus({
+        session_id: typeof args.session_id === 'string' ? args.session_id : undefined,
+        cwd: typeof args.cwd === 'string' ? args.cwd : undefined,
+      });
+    case 'belay_loop_create':
+      return loopCreate(args);
+    case 'belay_loop_list':
+      return buildLoopList();
+    case 'belay_loop_pause':
+      return loopPause({ goal: args.goal, note: args.note });
+    case 'belay_loop_resume':
+      return loopResume({ goal: args.goal });
+    case 'belay_loop_disarm':
+      return loopDisarm({ goal: args.goal });
+    case 'belay_propose':
+      return typeof args.dismiss === 'string' && args.dismiss ? dismiss(args.dismiss) : scan();
+    /* c8 ignore next 2 — unreachable: mcpServe pre-checks the name against TOOLS */
+    default:
+      throw new Error(`unknown tool: ${name}`);
+  }
+}
 
 /**
  * Serve MCP over stdio until stdin ends. Never throws once serving (per-request
@@ -117,6 +148,53 @@ const notImplemented = (fn) => Object.assign(new Error(`belay: ${fn} not impleme
  * @param {string[]} [argv] raw CLI args after the verb (reserved; no flags in v1)
  * @returns {Promise<void>}
  */
-export async function mcpServe(argv = []) {
-  throw notImplemented('mcpServe');
+export async function mcpServe(argv = []) { // eslint-disable-line no-unused-vars
+  const send = (msg) => process.stdout.write(JSON.stringify(msg) + '\n');
+  const rl = createInterface({ input: process.stdin });
+
+  rl.on('line', (line) => {
+    line = line.trim();
+    if (!line) return;
+    let msg;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      return; // garbage line — ignore, keep serving (ADR-4)
+    }
+    if (!msg || typeof msg !== 'object') return;
+    const { id, method, params } = msg;
+    if (id === undefined || typeof method !== 'string') return; // notifications ignored
+
+    if (method === 'initialize') {
+      send({
+        jsonrpc: '2.0',
+        id,
+        result: {
+          protocolVersion: params?.protocolVersion ?? PROTOCOL_VERSION,
+          capabilities: { tools: {} },
+          serverInfo: SERVER_INFO,
+        },
+      });
+    } else if (method === 'tools/list') {
+      send({ jsonrpc: '2.0', id, result: { tools: TOOLS } });
+    } else if (method === 'tools/call') {
+      const name = params?.name;
+      if (!TOOLS.some((t) => t.name === name)) {
+        send({ jsonrpc: '2.0', id, error: { code: -32602, message: `unknown tool: ${sanitizeText(String(name), 64)}` } });
+        return;
+      }
+      const args = params?.arguments && typeof params.arguments === 'object' && !Array.isArray(params.arguments) ? params.arguments : {};
+      // Whole tools/call body caught: a bad tool call returns a JSON-RPC error, the
+      // process never dies mid-session (ADR-4 applies to the server too). Handler error
+      // text is sanitized before it re-enters model-visible context (ADR-7).
+      dispatch(name, args).then(
+        (result) => send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(result, null, 1) }] } }),
+        (e) => send({ jsonrpc: '2.0', id, error: { code: -32603, message: sanitizeText(String(e?.message ?? e), 300) } })
+      );
+    } else {
+      send({ jsonrpc: '2.0', id, result: {} }); // ping & friends
+    }
+  });
+
+  await new Promise((resolve) => rl.on('close', resolve));
 }

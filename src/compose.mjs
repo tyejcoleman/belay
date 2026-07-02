@@ -1,3 +1,14 @@
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { readJSON, readConfig, toEpochSec, sanitizeText, sanitizeSlug, belayDir, tokenroomDir } from './util.mjs';
+import { keyokuHome, readKeyoku, goalSlug, unmetDetail } from './keyoku.mjs';
+import { readBudget } from './budget.mjs';
+import { readOwnState, sessionEntry } from './state.mjs';
+import { readLoops } from './loops.mjs';
+import { decideStop } from './stop.mjs';
+import { keyokuStatus, tokenroomInstalled, belayHooksStatus, claudeJsonPath } from './stack.mjs';
+import { configDir, MARK } from './install.mjs';
+
 // Shared composition — `belay status` (CLI) and `belay_status`/`belay_loop_list` (MCP)
 // all render from these, so CLI and MCP can never drift (docs/DESIGN.md §2.2 T1/T3, §2.3
 // — same discipline as stack.mjs sharing between bundle/doctor). Owner: agent A (round 1);
@@ -5,8 +16,90 @@
 //
 // ROUND-0 CONTRACT (FROZEN): every response field maps to an exact file source (ADR-9);
 // nothing is estimated by belay. Read-only — no writes, no spawns, hook-latency safe.
+//
+// Round-1 note on the stack block: DESIGN.md's T1 table names stackHealth() as the
+// source, but stackHealth → resolveTokenroom spawns `which` — forbidden by the no-spawn
+// line above. We compose from stackHealth's own exported building blocks instead
+// (keyokuStatus / tokenroomInstalled / belayHooksStatus — identical reads, zero spawns).
+// The one delta: tokenroom.present no longer counts a PATH-resolvable-but-never-installed
+// binary; ~/.tokenroom or an installed hook still counts (the states that carry data).
 
-const notImplemented = (fn) => Object.assign(new Error(`belay: ${fn} not implemented (round-0 stub — see docs/DESIGN.md)`), { code: 'ERR_NOT_IMPLEMENTED' });
+const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
+// ── Budget attribution (tokenroom ADR-24 mirror — DESIGN.md §2.2 T1) ─────────────────
+// MCP calls carry no session id. The sessions.json map tells us which ACCOUNTS were
+// active in the last ~10min: exactly one → use it (via readBudget's own per-account
+// routing, not the top-level pointer a concurrent account may have overwritten); two or
+// more with no session_id → quota figures are WITHHELD with an explicit `attribution`
+// note — wrong-account numbers are worse than none. `alt` survives a withhold: it names
+// its own profile, so it is never mis-attributed.
+
+const ACTIVE_WINDOW_SEC = 10 * 60;
+const AMBIGUOUS =
+  "ambiguous — quota withheld (2 or more accounts were active in the last 10 minutes and no session_id was given; pass this session's id to belay_status for exact attribution — wrong-account numbers are worse than none)";
+
+/** Active accounts from sessions.json: key → the freshest {sid, at} seen for it. */
+function activeAccounts(nowSec) {
+  const map = readJSON(join(tokenroomDir(), 'sessions.json'));
+  const byKey = new Map();
+  if (map && typeof map === 'object' && !Array.isArray(map)) {
+    for (const [sid, e] of Object.entries(map)) {
+      if (!e || typeof e !== 'object' || typeof e.key !== 'string' || !e.key) continue;
+      const at = toEpochSec(e.at);
+      if (at == null || nowSec - at > ACTIVE_WINDOW_SEC) continue;
+      const prev = byKey.get(e.key);
+      if (!prev || at > prev.at) byKey.set(e.key, { sid, at });
+    }
+  }
+  return byKey;
+}
+
+function attributedBudget(sessionId, nowSec) {
+  if (sessionId) return { ...readBudget(sessionId, nowSec), attribution: null };
+  const active = activeAccounts(nowSec);
+  if (active.size >= 2) {
+    const b = readBudget(undefined, nowSec); // for `alt` only — every quota figure is withheld
+    return { known: false, left_pct: null, resets_at: null, est_tokens_left: null, stale: false, last_known_left: null, alt: b.alt, attribution: AMBIGUOUS };
+  }
+  if (active.size === 1) return { ...readBudget(active.values().next().value.sid, nowSec), attribution: null };
+  return { ...readBudget(undefined, nowSec), attribution: null }; // no active accounts → legacy top-level pointer
+}
+
+// ── Stack block (read-only, spawn-free — see round-1 note above) ─────────────────────
+
+/** Is a MARK-owned hook registered for this settings.json event? (belayHooksStatus only
+ *  covers Stop/PreToolUse; SessionStart lands in round 1 via agent C's installer.) */
+function hookRegistered(dir, event) {
+  const s = readJSON(join(dir, 'settings.json'));
+  const entries = Array.isArray(s?.hooks?.[event]) ? s.hooks[event] : [];
+  return entries.some((m) => (m?.hooks ?? []).some((h) => typeof h?.command === 'string' && h.command.includes(MARK)));
+}
+
+/** Is a belay MCP server registered in ~/.claude.json (top level or any project block)? */
+function belayMcpRegistered() {
+  const cj = readJSON(claudeJsonPath());
+  const names = [];
+  if (cj && typeof cj === 'object') {
+    if (cj.mcpServers && typeof cj.mcpServers === 'object') names.push(...Object.keys(cj.mcpServers));
+    if (cj.projects && typeof cj.projects === 'object') {
+      for (const p of Object.values(cj.projects)) {
+        if (p && typeof p === 'object' && p.mcpServers && typeof p.mcpServers === 'object') names.push(...Object.keys(p.mcpServers));
+      }
+    }
+  }
+  return names.some((n) => /belay/i.test(n));
+}
+
+function stackView(dir) {
+  const k = keyokuStatus();
+  const installed = tokenroomInstalled(dir);
+  const hooks = belayHooksStatus(dir);
+  return {
+    tokenroom: { present: installed || existsSync(tokenroomDir()), installed },
+    keyoku: { registered: k.registered, version: k.version, inRange: k.inRange },
+    belay: { stop: hooks.stop, preToolUse: hooks.preToolUse, sessionStart: hookRegistered(dir, 'SessionStart'), mcpRegistered: belayMcpRegistered() },
+  };
+}
 
 /**
  * The whole loop brain in one composed object (DESIGN.md §2.2 T1 field table):
@@ -24,12 +117,80 @@ const notImplemented = (fn) => Object.assign(new Error(`belay: ${fn} not impleme
  *   proposals_open ← ~/.belay/proposals.json (count only)
  * All sibling-derived strings sanitized (ADR-7) before they land in the response.
  *
+ * Scope defaults: cwd falls back to the server process cwd (the frozen T1 schema text);
+ * session_id falls back to the focus's own sessionId pin when one exists (a session-
+ * pinned focus is judged as that session would be — the status.mjs posture), else the
+ * ADR-24 attribution rule above decides whose budget we may report.
+ *
  * @param {{ session_id?: string, cwd?: string }} [opts]
  * @returns {{ stack: object, budget: object, goal: object|null, loop: object|null,
  *            counters: object, verdict: object, proposals_open: number }}
  */
 export function buildStatus({ session_id, cwd } = {}) {
-  throw notImplemented('buildStatus');
+  const nowSec = Date.now() / 1000;
+  const { cfg } = readConfig();
+  const dir = configDir([]);
+
+  const focus = readJSON(join(keyokuHome(), 'focus.json'));
+  const focusSession = focus && typeof focus === 'object' && typeof focus.sessionId === 'string' && focus.sessionId ? focus.sessionId : null;
+  const sessionId = typeof session_id === 'string' && session_id ? session_id : focusSession;
+  const effCwd = typeof cwd === 'string' && cwd ? cwd : process.cwd();
+
+  const budget = attributedBudget(sessionId, nowSec);
+  const k = readKeyoku({ sessionId: sessionId ?? 'status-probe', cwd: effCwd });
+  const own = readOwnState();
+  const entry = sessionEntry(own, sessionId ?? 'status-probe', k.goal?.id ?? null);
+  // The SAME pure function the Stop hook runs — read-only here: the mutated counter
+  // entry decideStop hands back is deliberately NOT persisted (like status.mjs).
+  const d = decideStop({ session_id: sessionId ?? 'status-probe', cwd: effCwd, stop_hook_active: false }, k, budget, cfg, entry);
+
+  let goal = null;
+  if (k.goal) {
+    const g = k.goal;
+    const freshCandidates = [toEpochSec(g.lastAssessedAt), toEpochSec(k.obs?.at)].filter((t) => t != null);
+    const freshAt = freshCandidates.length ? Math.max(...freshCandidates) : null;
+    goal = {
+      id: g.id,
+      slug: sanitizeSlug(goalSlug(g, k.focus)),
+      status: sanitizeSlug(typeof g.status === 'string' ? g.status : 'unknown', 32),
+      autonomy: sanitizeSlug(typeof g.autonomy === 'string' ? g.autonomy : 'unknown', 32),
+      usedIterations: num(g.usedIterations),
+      maxIterations: num(g.maxIterations),
+      lastAssessedAt: typeof g.lastAssessedAt === 'string' ? g.lastAssessedAt : null,
+      constraints: Array.isArray(g.constraints) ? g.constraints.filter((c) => typeof c === 'string' && c).map((c) => sanitizeText(c, 200)) : [],
+      unmet: unmetDetail(g, k.obs), // per-item sanitized in keyoku.mjs; null = no readable assessment
+      assessment_age_min: freshAt == null ? null : Math.max(0, Math.round((nowSec - freshAt) / 60)),
+    };
+  }
+
+  const le = k.goal ? readLoops().loops[k.goal.id] : null;
+  const loop =
+    le && typeof le === 'object'
+      ? {
+          armed: le.armed === true,
+          paused: le.paused === true,
+          armed_at: num(le.armed_at),
+          armed_by: typeof le.armed_by === 'string' ? sanitizeText(le.armed_by, 64) : null,
+          proposal_id: typeof le.proposal_id === 'string' ? sanitizeSlug(le.proposal_id, 32) : null,
+        }
+      : null;
+
+  const props = readJSON(join(belayDir(), 'proposals.json'));
+  const proposals_open = props && Array.isArray(props.proposals) ? props.proposals.filter((p) => p && typeof p === 'object' && p.status === 'open').length : 0;
+
+  const verdict = { action: d.action, kind: d.kind };
+  if (d.reason) verdict.reason = d.reason;
+  if (d.note) verdict.note = d.note;
+
+  return {
+    stack: stackView(dir),
+    budget,
+    goal,
+    loop,
+    counters: { continuations: entry.continuations, max: cfg.max_continuations, staleBlocked: entry.staleBlocked },
+    verdict,
+    proposals_open,
+  };
 }
 
 /**
@@ -37,11 +198,64 @@ export function buildStatus({ session_id, cwd } = {}) {
  * goals.json rows (status/autonomy/lastAssessedAt/convergedAt) × focus.json × loops.json
  * × state.json counters. Read-only, no spawn.
  *
+ * A row is loop-relevant when it is the focused goal, an active autonomous goal
+ * (armable), carries a loops.json entry (armed/paused), or is a stale-converged goal
+ * (re-assess candidate per cfg.stale_converged_days). `continuations` is the additive
+ * counters composition: the sum of this goal's per-session spends from state.json.
+ * Order: focused → armed → active autonomous → stale-converged, then by slug.
+ *
  * @returns {{ loops: Array<{ goalId: string, slug: string, status: string,
  *            autonomy: string, focused: boolean, armed: boolean, paused: boolean,
  *            armed_by?: string, usedIterations?: number, maxIterations?: number,
  *            lastAssessedAt?: string, convergedAt?: string, stale_converged?: boolean }> }}
  */
 export function buildLoopList() {
-  throw notImplemented('buildLoopList');
+  const nowSec = Date.now() / 1000;
+  const { cfg } = readConfig();
+  const home = keyokuHome();
+  const goals = readJSON(join(home, 'goals.json'));
+  const rows = Array.isArray(goals) ? goals.filter((g) => g && typeof g === 'object' && typeof g.id === 'string' && g.id) : [];
+  const focus = readJSON(join(home, 'focus.json'));
+  const focusId = focus && typeof focus === 'object' && typeof focus.goalId === 'string' ? focus.goalId : null;
+  const loops = readLoops().loops;
+  const own = readOwnState();
+
+  const out = [];
+  for (const g of rows) {
+    const le = loops[g.id] && typeof loops[g.id] === 'object' ? loops[g.id] : null;
+    const focused = g.id === focusId;
+    const armable = g.status === 'active' && g.autonomy === 'autonomous';
+    // S3 predicate (DESIGN.md §4.1): converged, last ground truth older than the config
+    // window. Never re-assessed at all → convergedAt stands in; neither → stale.
+    const assessedAt = toEpochSec(g.lastAssessedAt) ?? toEpochSec(g.convergedAt);
+    const staleConverged = g.status === 'converged' && (assessedAt == null || nowSec - assessedAt > cfg.stale_converged_days * 86400);
+    if (!focused && !armable && !le && !staleConverged) continue;
+
+    let continuations = 0;
+    for (const e of Object.values(own.sessions)) {
+      if (e && typeof e === 'object' && e.goalId === g.id && num(e.continuations) != null) continuations += e.continuations;
+    }
+
+    const row = {
+      goalId: g.id,
+      slug: sanitizeSlug(goalSlug(g, focused ? focus : null)),
+      status: sanitizeSlug(typeof g.status === 'string' ? g.status : 'unknown', 32),
+      autonomy: sanitizeSlug(typeof g.autonomy === 'string' ? g.autonomy : 'unknown', 32),
+      focused,
+      armed: le?.armed === true,
+      paused: le?.paused === true,
+      continuations,
+    };
+    if (typeof le?.armed_by === 'string') row.armed_by = sanitizeText(le.armed_by, 64);
+    if (num(g.usedIterations) != null) row.usedIterations = g.usedIterations;
+    if (num(g.maxIterations) != null) row.maxIterations = g.maxIterations;
+    if (typeof g.lastAssessedAt === 'string') row.lastAssessedAt = g.lastAssessedAt;
+    if (typeof g.convergedAt === 'string') row.convergedAt = g.convergedAt;
+    if (g.status === 'converged') row.stale_converged = staleConverged;
+    out.push(row);
+  }
+
+  const rank = (r) => (r.focused ? 0 : r.armed ? 1 : r.status === 'active' ? 2 : 3);
+  out.sort((a, b) => rank(a) - rank(b) || a.slug.localeCompare(b.slug));
+  return { loops: out };
 }
