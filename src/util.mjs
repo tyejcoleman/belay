@@ -131,6 +131,7 @@ export const CONFIG_DEFAULTS = {
   thin_budget_pct: 15, // below this the block reason switches to descent wording
   stale_assess_min: 60, // observations older than this get one "run goal_assess first" block, then allow
   gate_enabled: true, // PreToolUse policy gate master switch
+  gate_mode: 'ask', // 'ask' routes irreversible classes to the human live; 'defer' denies-with-guidance and queues them for one batched review at convergence (ADR-16)
   ask_patterns: [], // extra [{pattern, class, note}] — tested against BOTH tool_name and Bash command
   allow_overrides: [], // [pattern] force-allow, matched before any ask class
   proposals_enabled: true, // master switch for the proposal scan + SessionStart surfacing (DESIGN.md §3.5)
@@ -169,6 +170,10 @@ export function validateConfig(raw) {
     if (raw[key] === undefined) continue;
     if (typeof raw[key] === 'boolean') cfg[key] = raw[key];
     else warnings.push(`config: ${key} must be a boolean — using default ${CONFIG_DEFAULTS[key]}`);
+  }
+  if (raw.gate_mode !== undefined) {
+    if (raw.gate_mode === 'ask' || raw.gate_mode === 'defer') cfg.gate_mode = raw.gate_mode;
+    else warnings.push(`config: gate_mode must be 'ask' or 'defer' — using default '${CONFIG_DEFAULTS.gate_mode}'`);
   }
   if (raw.ask_patterns !== undefined) {
     if (Array.isArray(raw.ask_patterns)) {

@@ -8,6 +8,34 @@
 > feeds rope, the PreToolUse gate is the fall-arrest. **Entries below this line predate the
 > rename and name the tool "conductor"; they are kept verbatim as accurate history.**
 
+## 0.3.0 — 2026-07-02
+
+### gate_mode 'defer' — deny-with-guidance + a pending queue for one batched review (ADR-16)
+
+- **New config field `gate_mode`** (`'ask'` | `'defer'`, default `'ask'`; anything else
+  falls back to the default with a doctor warning). In `'ask'` mode the gate is
+  byte-identical to 0.2.0. In `'defer'` mode, irreversible/external classes under an
+  autonomous goal are **DENIED with guidance** (`'<class>' action deferred under
+  autonomous goal — queued for batched human approval at convergence; continue with
+  sandbox-safe work`) instead of stalling an unattended loop on an `ask` nobody will
+  answer. Deny is strictly SAFER than ask — the arrest is never weakened, and under
+  `bypassPermissions` defer already denies, so ADR-13's semantics are preserved.
+- **Pending queue** — each deferred action is appended to `~/.belay/pending.json`
+  (`{id, ts, class, tool_name, command (capped 500), goalId, sessionId}`; deduped by a
+  content hash of class+command+goalId so a retried action queues once; dir 0700 / file
+  0600 / atomic writes, the state.mjs pattern). The queue is **presentation metadata
+  only**: no gate or stop decision ever reads it (the ADR-12 no-path rule, mirrored).
+- **Surfacing** — `belay status` and `belay_status` gain `pending: {count, classes}`;
+  a converged-goal stop that is allowed adds a stderr reminder (`N deferred action(s)
+  await approval — run 'belay pending'`); new CLI `belay pending` lists the queue
+  human-readably, `--clear` empties it, `--remove <id>` drops one entry.
+- **Unchanged** — the spawn-tools thin-budget branch stays `'ask'` in both modes (it is
+  a budget question, not irreversibility); default/ask-mode gate output is
+  byte-identical for the same inputs (regression-tested).
+- New standalone convergence probe `test/fixtures/defer-mode-check.mjs` (exit 0 = pass,
+  runs with no test runner) plus defer/queue regression tests in `test/gate.test.mjs`
+  and `test/pending.test.mjs`.
+
 ## 0.2.0 — 2026-07-02
 
 The SOTA meta-harness release: belay becomes MCP-accessible, creates and runs autonomous

@@ -1,13 +1,16 @@
 import { resolve } from 'node:path';
-import { readStdin, readConfig, toRegExp, capReason } from './util.mjs';
+import { readStdin, readConfig, toRegExp, capReason, sanitizeText } from './util.mjs';
 import { readKeyoku } from './keyoku.mjs';
 import { readBudget } from './budget.mjs';
+import { appendPending } from './pending.mjs';
 
 // PreToolUse policy gate (autonomy x budget x action-class). ONLY active while a
 // scope-matched focused AUTONOMOUS ACTIVE goal exists — belay never polices normal
 // interactive use (ADR-4). Irreversible/external actions route to the HUMAN via
 // permissionDecision "ask" (ADR-3: the human decides; belay only makes sure the
-// question gets asked). Everything unmatched exits silently.
+// question gets asked) — or, under gate_mode 'defer' (ADR-16), are DENIED with guidance
+// and queued for one batched human review at convergence (strictly safer than ask; the
+// arrest is never weakened). Everything unmatched exits silently.
 
 export const SPAWN_TOOLS = ['Task', 'Agent', 'Workflow'];
 
@@ -175,9 +178,27 @@ export function decideGate(p, k, budget, cfg) {
 
   const hit = classify(name, command, p.cwd, cfg);
   if (hit) {
+    // gate_mode 'defer' (ADR-16): deny-with-guidance instead of ask, so an unattended
+    // loop is never stalled on a prompt nobody will answer — the action is queued (by the
+    // hook wrapper, never here: this function stays pure) for ONE batched human review at
+    // convergence. Deny is strictly SAFER than ask, so no escalateForBypass pass is
+    // needed: under bypassPermissions this is already the ADR-13 end state. The `defer`
+    // field is hook-internal routing metadata — it never reaches stdout.
+    if (cfg.gate_mode === 'defer') {
+      // MCP-tool hits carry no command — capture the capped tool_input JSON instead, so
+      // the batched review shows WHAT would have been sent, not just which tool.
+      const detail = command || (p.tool_input ? JSON.stringify(p.tool_input) : '');
+      return {
+        decision: 'deny',
+        reason: capReason(`[belay] '${sanitizeText(hit.class, 40)}' action deferred under autonomous goal — queued for batched human approval at convergence; continue with sandbox-safe work (gate_mode: defer)`),
+        defer: { class: hit.class, tool_name: name, command: (detail || '').slice(0, 500) },
+      };
+    }
+    // class/note can originate from config ask_patterns (a file), so they never land raw
+    // in a model-visible reason (ADR-7).
     return escalateForBypass(p, {
       decision: 'ask',
-      reason: `[belay] '${hit.class}' action under autonomous goal — requires human approval (goal constraint policy)${hit.note ? ` — ${hit.note}` : ''}`,
+      reason: capReason(`[belay] '${sanitizeText(hit.class, 40)}' action under autonomous goal — requires human approval (goal constraint policy)${hit.note ? ` — ${sanitizeText(hit.note, 120)}` : ''}`),
     });
   }
 
@@ -206,6 +227,16 @@ export async function hookPreToolUse() {
     const budget = SPAWN_TOOLS.includes(p.tool_name) ? readBudget(p.session_id) : null;
     const d = decideGate(p, k, budget, cfg);
     if (!d) return;
+    if (d.defer) {
+      // Queue the deferred action for the batched review (ADR-16). Its own try/catch:
+      // the queue is presentation metadata, and a failed append must NEVER drop the deny
+      // below — the arrest always lands even if the bookkeeping doesn't.
+      try {
+        appendPending({ ...d.defer, goalId: k.goal.id, sessionId: p.session_id });
+      } catch {
+        // best-effort — the deny still goes out
+      }
+    }
     process.stdout.write(
       JSON.stringify({
         hookSpecificOutput: {

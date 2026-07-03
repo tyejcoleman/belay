@@ -25,7 +25,8 @@ headless runs, never reuses or reads credentials, never calls the network, and n
 burns quota outside the interactive session you are already in. **The human always
 approves irreversible actions** (push, publish, external sends, destructive deletes route
 to `permissionDecision: "ask"`, even under an autonomous goal — even while a loop is
-paused). There is exactly **one spawn exception** (ADR-10): when you explicitly create or
+paused; in `gate_mode: "defer"` they are DENIED and queued for one batched human review
+at convergence, which is strictly safer — the action never runs until a human runs it). There is exactly **one spawn exception** (ADR-10): when you explicitly create or
 disarm a loop, belay talks to keyoku through **keyoku's own registered MCP server
 process** — spawned short-lived at MCP-call latency, never from a hook — and belay never
 rewrites keyoku's state files itself. That's the compliance line, on purpose.
@@ -40,8 +41,10 @@ rewrites keyoku's state files itself. That's the compliance line, on purpose.
 - **PreToolUse gate** — only while an autonomous goal is focused, irreversible/external
   actions (`git push`, `npm publish`, `gh pr merge`, `rm -rf` outside cwd, curl/wget
   writes to non-localhost, MCP send/publish tools) are routed to the **human** via
-  `permissionDecision: "ask"`. Expensive spawns (Task/Agent/Workflow) are asked about
-  under thin budget. Everything else passes untouched.
+  `permissionDecision: "ask"` — or, with `gate_mode: "defer"`, **denied with guidance**
+  and queued in `~/.belay/pending.json` for one batched review at convergence (ADR-16;
+  deny is strictly safer than ask). Expensive spawns (Task/Agent/Workflow) are asked
+  about under thin budget in both modes. Everything else passes untouched.
 - **SessionStart briefing** — a <50ms pure-file scan surfaces up to 3 open loop
   *proposals* (deferred work past its resume time, unfocused autonomous goals,
   stale-converged goals, keyoku's own ripe suggestions) as `additionalContext`.
@@ -246,14 +249,32 @@ data) → block carries **no** budget line (permissive for stop decisions — ne
 |---|---|
 | `gate_enabled: false`, or no scope-matched focused **active autonomous** goal | silent (allow) |
 | `allow_overrides` pattern matches tool name or command | silent (allow) |
-| Bash: `git push` · `npm publish` · `gh (pr\|release\|repo) (create\|merge\|edit\|delete)` · `rm -rf` outside cwd · curl/wget POST/PUT (or body upload) to non-localhost | **ask** — `'<class>' action under autonomous goal — requires human approval (goal constraint policy)` |
-| MCP tool name matching send/publish (`mcp__*send/publish/add_message/post_message/create_draft`) | **ask** (same wording, class `external send/publish`) |
-| config `ask_patterns` match (tested against tool name AND command) | **ask** with configured class/note |
-| Task/Agent/Workflow while budget < `spawn_floor_pct` (10%) — fresh, **or stale last-known** (conservative) — and no fresh alt profile | **ask** — `budget descent: no new subagents below 10% — do the work inline in small steps` |
+| Bash: `git push` · `npm publish` · `gh (pr\|release\|repo) (create\|merge\|edit\|delete)` · `rm -rf` outside cwd · curl/wget POST/PUT (or body upload) to non-localhost | **ask** — `'<class>' action under autonomous goal — requires human approval (goal constraint policy)`; in `gate_mode: "defer"` → **deny** + queue (ADR-16, below) |
+| MCP tool name matching send/publish (`mcp__*send/publish/add_message/post_message/create_draft`) | **ask** (same wording, class `external send/publish`); defer mode → **deny** + queue |
+| config `ask_patterns` match (tested against tool name AND command) | **ask** with configured class/note; defer mode → **deny** + queue |
+| Task/Agent/Workflow while budget < `spawn_floor_pct` (10%) — fresh, **or stale last-known** (conservative) — and no fresh alt profile | **ask** — `budget descent: no new subagents below 10% — do the work inline in small steps` — in **both** gate modes (a budget question, not irreversibility) |
 | everything else | silent (allow) |
 
 The gate never consults loop state: no code path leads from `loops.json` to the gate
 decision, so no loop machinery (arm, pause, proposal) can weaken the arrest (ADR-12).
+
+#### Defer mode (`gate_mode: "defer"`, ADR-16)
+
+`ask` stalls an unattended loop until a human answers. In defer mode the gate instead
+returns **deny-with-guidance** — `'<class>' action deferred under autonomous goal —
+queued for batched human approval at convergence; continue with sandbox-safe work` — and
+appends the action to `~/.belay/pending.json` (`{id, ts, class, tool_name, command,
+goalId, sessionId}`, deduped by a content hash of class+command+goalId so a retried
+action queues once, command capped at 500 chars, file 0600). Deny is **strictly safer**
+than ask: the arrest is never weakened, and under `bypassPermissions` defer already
+denies, so ADR-13's semantics are unchanged. When the goal converges and the stop is
+allowed, a stderr note reminds you: `N deferred action(s) await approval — run 'belay
+pending'`; `belay status` / `belay_status` carry `pending: {count, classes}`. Review with
+`belay pending`, run the approved actions yourself, then `belay pending --clear` (or
+`--remove <id>`). The queue is presentation metadata and is **never consulted by any gate
+or stop decision** — no code path leads from `pending.json` to a decision (the ADR-12
+no-path rule, mirrored), so a queue entry is a reminder, never a permission. The default
+stays `"ask"`.
 
 ### SessionStart briefing (`belay hook session-start`)
 
@@ -272,6 +293,9 @@ ever, from a hook. Errors are silent (never-crash rule).
   "thin_budget_pct": 15,         // below this the block reason switches to descent wording
   "stale_assess_min": 60,        // observations older than this trigger the one stale-block
   "gate_enabled": true,          // PreToolUse gate master switch
+  "gate_mode": "ask",            // 'ask' (default): route irreversibles to the human live;
+                                 // 'defer': deny-with-guidance + queue for one batched review
+                                 // at convergence (`belay pending`) — strictly safer (ADR-16)
   "ask_patterns": [              // extra ask classes; pattern is a JS regex (case-insensitive),
     {                            // tested against BOTH the tool name and the Bash command
       "pattern": "terraform\\s+apply",
@@ -296,7 +320,7 @@ and `belay doctor` reports the warning. Bad config never crashes a hook.
 |---|---|---|
 | Keyoku (`$KEYOKU_HOME` \|\| `~/.keyoku`) | `paused`, `focus.json`, `goals.json`, `observations/<goalId>.jsonl`, `ripe.json` | read-only from files, pinned to keyoku >=2.7 <3, layout self-checked by `belay doctor`. Never runs probes; never rewrites goals/focus. Writes go ONLY through keyoku's own registered server process, spawned per explicit loop create/disarm call (ADR-10) — never from hooks. |
 | tokenroom (`$TOKENROOM_DIR` \|\| `~/.tokenroom`) | `state.json`, `accounts/<key>/state.json`, `sessions.json`, `profiles.json`, `resume.json` | read-only. >30min old → budget UNKNOWN. |
-| belay (`$BELAY_DIR` \|\| `~/.belay`) | `state.json` (continuation counters), `config.json`, `loops.json` (arm/pause provenance), `proposals.json` | its own state only; dirs 0700, files 0600, atomic writes. No goal data is copied beyond the goalId key. |
+| belay (`$BELAY_DIR` \|\| `~/.belay`) | `state.json` (continuation counters), `config.json`, `loops.json` (arm/pause provenance), `proposals.json`, `pending.json` (defer-mode queue — presentation metadata, never consulted by a decision) | its own state only; dirs 0700, files 0600, atomic writes. No goal data is copied beyond the goalId key. |
 
 ## CLI
 
@@ -316,6 +340,7 @@ belay loop pause <goal> [--note <text>]    pause the Stop hold (the fall-arrest 
 belay loop resume <goal>                   resume (re-demands a fresh goal_assess)
 belay loop disarm <goal>                   unfocus via keyoku + clear arm state
 belay propose [--dismiss <id>]             scan for loop-worthy signals; advisory, never auto-armed
+belay pending [--clear | --remove <id>]    review actions deferred by gate_mode 'defer' (denied + queued for batched approval)
 belay hook <stop|pre-tool-use|session-start>   # wired by install
 ```
 

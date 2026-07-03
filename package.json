@@ -1,6 +1,6 @@
 {
   "name": "belay-harness",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Belay \u2014 the always-on goal loop for Claude Code: a Stop hook that keeps the agent working (feeds rope) while its focused Keyoku goal is unconverged and budget allows, plus a PreToolUse fall-arrest gate (autonomy x budget x action-class). Reads Keyoku and tokenroom state files; never spawns their processes. Command/bin: belay. npm package: belay-harness (bare 'belay' is taken).",
   "type": "module",
   "bin": {

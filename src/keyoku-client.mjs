@@ -173,7 +173,7 @@ export async function keyokuSession({ timeoutMs } = {}) {
   // Handshake per ADR-10: initialize → notifications/initialized. A dead/hung server
   // surfaces HERE (sanitized reject, child killed) — never as a wedged tool call.
   try {
-    await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'belay', version: '0.2.0' } });
+    await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'belay', version: '0.3.0' } });
   } catch (e) {
     try {
       child.kill('SIGKILL');

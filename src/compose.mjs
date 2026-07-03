@@ -5,6 +5,7 @@ import { keyokuHome, readKeyoku, goalSlug, unmetDetail } from './keyoku.mjs';
 import { readBudget } from './budget.mjs';
 import { readOwnState, sessionEntry } from './state.mjs';
 import { readLoops } from './loops.mjs';
+import { pendingSummary } from './pending.mjs';
 import { decideStop } from './stop.mjs';
 import { keyokuStatus, tokenroomInstalled, belayHooksStatus, claudeJsonPath } from './stack.mjs';
 import { configDir, MARK } from './install.mjs';
@@ -123,6 +124,8 @@ function stackView(dir) {
  *   verdict   ← decideStop(payload, k, budget, cfg, entry) — the SAME pure function the
  *               Stop hook runs: { action, kind, reason? }
  *   proposals_open ← ~/.belay/proposals.json (count only)
+ *   pending   ← ~/.belay/pending.json: { count, classes } (ADR-16 — presentation
+ *               metadata only; absent file → { count: 0, classes: [] })
  * All sibling-derived strings sanitized (ADR-7) before they land in the response.
  *
  * Scope defaults: cwd falls back to the server process cwd (the frozen T1 schema text);
@@ -132,7 +135,8 @@ function stackView(dir) {
  *
  * @param {{ session_id?: string, cwd?: string }} [opts]
  * @returns {{ stack: object, budget: object, goal: object|null, loop: object|null,
- *            counters: object, verdict: object, proposals_open: number }}
+ *            counters: object, verdict: object, proposals_open: number,
+ *            pending: { count: number, classes: string[] } }}
  */
 export function buildStatus({ session_id, cwd } = {}) {
   const nowSec = Date.now() / 1000;
@@ -222,6 +226,7 @@ export function buildStatus({ session_id, cwd } = {}) {
     counters,
     verdict,
     proposals_open,
+    pending: pendingSummary(),
   };
 }
 

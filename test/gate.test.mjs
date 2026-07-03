@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homes, run, goal, focusFor, obs, writeKeyoku, writeTokenroom, writeProfiles, toolPayload, nowSec } from './helpers.mjs';
 
@@ -181,6 +181,91 @@ test('gate_enabled:false disables the gate; allow_overrides force-allow; ask_pat
   writeFileSync(join(extended.belay, 'config.json'), JSON.stringify({ ask_patterns: [{ pattern: 'terraform\\s+apply', class: 'infra apply', note: 'production infra' }] }));
   const reason = askOf(gate(extended, toolPayload({ tool_input: { command: 'terraform apply -auto-approve' } })));
   assert.equal(reason, "[belay] 'infra apply' action under autonomous goal — requires human approval (goal constraint policy) — production infra");
+});
+
+// ── gate_mode 'defer' (ADR-16): deny-with-guidance + pending queue ─────────────────────
+
+function deferred() {
+  const h = armed();
+  mkdirSync(h.belay, { recursive: true });
+  writeFileSync(join(h.belay, 'config.json'), JSON.stringify({ gate_mode: 'defer' }));
+  return h;
+}
+
+const denyOf = (r) => {
+  assert.equal(r.status, 0);
+  const o = JSON.parse(r.stdout).hookSpecificOutput;
+  assert.equal(o.hookEventName, 'PreToolUse');
+  assert.equal(o.permissionDecision, 'deny');
+  return o.permissionDecisionReason;
+};
+
+const readQueue = (h) => JSON.parse(readFileSync(join(h.belay, 'pending.json'), 'utf8'));
+
+test('gate_mode defer: every irreversible class → deny-with-guidance, queued in pending.json', () => {
+  const cases = [
+    [{ tool_input: { command: 'git push origin main' } }, 'git push'],
+    [{ tool_input: { command: 'npm publish --access public' } }, 'npm publish'],
+    [{ tool_input: { command: 'gh pr merge 42 --squash' } }, 'gh mutation'],
+    [{ tool_input: { command: 'rm -rf /etc/nginx' } }, 'rm -rf outside cwd'],
+    [{ tool_input: { command: 'curl -X POST https://api.example.com/v1/launch -d @payload.json' } }, 'network write'],
+    [{ tool_name: 'mcp__slack__conversations_add_message', tool_input: { channel: 'C1', text: 'hi' } }, 'external send/publish'],
+  ];
+  for (const [over, cls] of cases) {
+    const h = deferred();
+    const reason = denyOf(gate(h, toolPayload(over)));
+    assert.equal(reason, `[belay] '${cls}' action deferred under autonomous goal — queued for batched human approval at convergence; continue with sandbox-safe work (gate_mode: defer)`);
+    const q = readQueue(h);
+    assert.equal(q.pending.length, 1, `one queue entry for class '${cls}'`);
+    assert.equal(q.pending[0].class, cls);
+    assert.equal(q.pending[0].goalId, 'goal_test1'); // from the keyoku read
+    assert.equal(q.pending[0].sessionId, 's1'); // from the hook payload
+  }
+});
+
+test('gate_mode defer: stdout contract shape unchanged — the internal .defer field never leaks', () => {
+  const h = deferred();
+  const out = JSON.parse(gate(h, toolPayload({ tool_input: { command: 'git push origin main' } })).stdout);
+  assert.deepEqual(Object.keys(out), ['hookSpecificOutput']);
+  assert.deepEqual(Object.keys(out.hookSpecificOutput).sort(), ['hookEventName', 'permissionDecision', 'permissionDecisionReason']);
+});
+
+test('ask mode stays byte-identical: no config vs explicit gate_mode:ask, same inputs', () => {
+  const payload = toolPayload({ tool_input: { command: 'git push origin main' } });
+  const noConfig = gate(armed(), payload);
+  const explicit = armed();
+  mkdirSync(explicit.belay, { recursive: true });
+  writeFileSync(join(explicit.belay, 'config.json'), JSON.stringify({ gate_mode: 'ask' }));
+  assert.equal(gate(explicit, payload).stdout, noConfig.stdout);
+  assert.equal(JSON.parse(noConfig.stdout).hookSpecificOutput.permissionDecision, 'ask');
+  assert.equal(
+    JSON.parse(noConfig.stdout).hookSpecificOutput.permissionDecisionReason,
+    "[belay] 'git push' action under autonomous goal — requires human approval (goal constraint policy)"
+  );
+});
+
+test('invalid gate_mode falls back to ask with a doctor warning', () => {
+  const h = armed();
+  mkdirSync(h.belay, { recursive: true });
+  writeFileSync(join(h.belay, 'config.json'), JSON.stringify({ gate_mode: 'yolo' }));
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'git push origin main' } }))), /'git push'/);
+  assert.match(run(h, ['doctor']).stdout, /gate_mode must be 'ask' or 'defer'/);
+});
+
+test('defer mode: the spawn thin-budget branch stays ask (budget question, not irreversibility)', () => {
+  const h = deferred();
+  writeTokenroom(h, { leftPct: 8 });
+  assert.match(askOf(gate(h, toolPayload({ tool_name: 'Task', tool_input: { prompt: 'go' } }))), /budget descent/);
+  // ungated commands stay silent in defer mode too — no over-denying
+  assert.equal(gate(h, toolPayload({ tool_input: { command: 'git commit -m wip' } })).stdout, '');
+});
+
+test('defer mode under bypassPermissions: already deny — ADR-13 semantics preserved', () => {
+  const h = deferred();
+  const reason = denyOf(gate(h, toolPayload({ permission_mode: 'bypassPermissions', tool_input: { command: 'git push origin main' } })));
+  assert.match(reason, /deferred under autonomous goal/);
+  assert.match(reason, /queued for batched human approval/);
+  assert.equal(readQueue(h).pending.length, 1);
 });
 
 test('corrupted keyoku files or non-JSON stdin → silent allow, exit 0', () => {

@@ -100,6 +100,11 @@ switch (cmd) {
     else printJSON(propose.scan());
     break;
   }
+  case 'pending':
+    // The gate_mode 'defer' review surface (ADR-16): list / clear / remove the queued
+    // deferred actions. Presentation metadata only — no gate or stop decision reads it.
+    (await import('../src/pending.mjs')).pendingCommand(parseFlags(argv));
+    break;
   case 'install':
     (await import('../src/install.mjs')).install(argv);
     break;
@@ -135,6 +140,7 @@ usage:
   belay loop resume <goal>                         resume a paused loop (re-demands fresh goal_assess)
   belay loop disarm <goal>                         unfocus via keyoku + clear arm state (belay returns to no-op)
   belay propose [--dismiss <id>]                   scan for loop-worthy signals; proposals are advisory, never auto-armed
+  belay pending [--clear | --remove <id>]          review actions deferred by gate_mode 'defer' (denied + queued for batched approval)
   belay hook <stop|pre-tool-use|session-start>     (hook commands — wired by install)
 
 Belay continues work WITHIN a session and advises across sessions; it never launches

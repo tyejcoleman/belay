@@ -5,6 +5,7 @@ import { readBudget } from './budget.mjs';
 import { readOwnState, sessionEntry } from './state.mjs';
 import { decideStop } from './stop.mjs';
 import { readLoops } from './loops.mjs';
+import { pendingSummary } from './pending.mjs';
 
 /** Open-proposal count straight from proposals.json (ADR-9 posture: a count, never copies;
  *  absent/malformed → 0). `belay propose` / belay_propose carry the full evidence. */
@@ -33,6 +34,9 @@ export function status() {
   const proposalsLine = () => {
     const n = openProposalCount();
     console.log(`  proposals: ${n} open${n ? ' — `belay propose` for evidence + ready-to-arm args (never auto-armed)' : ''}`);
+    // ADR-16: deferred-action queue (presentation metadata only — no decision reads it).
+    const pend = pendingSummary();
+    console.log(`  pending: ${pend.count} deferred${pend.count ? ` [${pend.classes.join(', ')}] — run \`belay pending\` to review` : ''}`);
   };
   if (!k.present) {
     console.log('  keyoku home not found — belay idles');

@@ -222,6 +222,17 @@ export async function hookStop() {
     if (d.save && d.entry) saveSessionEntry(own, p.session_id, d.entry);
     journalStop(p, d.kind, d.action, k.goal.id);
     if (d.note) process.stderr.write(d.note + '\n');
+    if (d.kind === 'converged') {
+      // ADR-16 surfacing only — the stop DECISION above never consulted the queue (the
+      // ADR-12 no-path rule): the goal converged, the stop is allowed, and the human is
+      // reminded that deferred actions await their batched review. Never wedges a stop.
+      try {
+        const n = (await import('./pending.mjs')).readPending().pending.length;
+        if (n > 0) process.stderr.write(`[belay] ${n} deferred action(s) await approval — run 'belay pending'\n`);
+      } catch {
+        // presentation metadata — skip the note, never the stop
+      }
+    }
     if (d.action === 'block') process.stdout.write(JSON.stringify({ decision: 'block', reason: d.reason }));
   } catch {
     // ANY error = silent exit 0: a hook must never break the harness

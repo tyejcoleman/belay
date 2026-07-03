@@ -359,6 +359,45 @@ refund (resuming onto stale truth un-assessed is worse), the refund is kept and 
 expensive-and-paired, the reset is scoped to what the caller actually armed, and the
 stated bound now tells the truth.
 
+## ADR-16 — gate_mode 'defer': deny-with-guidance + a pending queue for one batched review
+
+**Decision:** The config field `gate_mode` (`'ask'` | `'defer'`, default `'ask'`; any other
+value falls back to the default with a warning) selects what the PreToolUse gate does when
+an irreversible/external class matches under a focused autonomous goal. `'ask'` is the
+standing ADR-3 behavior, byte-identical. `'defer'` returns `permissionDecision: "deny"`
+with guidance — the action is deferred and queued; continue with sandbox-safe work — and
+the hook appends it to `~/.belay/pending.json` (entry `{id, ts, class, tool_name, command
+(capped 500), goalId, sessionId}`; `id` is a short content hash of class+command+goalId so
+a retried action queues once; dir 0700 / file 0600 / atomic tmp+rename, the state.mjs
+pattern) for ONE batched human review at convergence: the converged-stop allow adds a
+stderr reminder ("N deferred action(s) await approval — run 'belay pending'"),
+`belay status` / `belay_status` carry `pending: {count, classes}`, and
+`belay pending [--clear | --remove <id>]` is the review surface. **The queue is
+presentation metadata and is NEVER consulted by any gate or stop decision — no code path
+leads from `pending.json` to a decision** (the ADR-12 no-path rule, mirrored). The
+spawn-tools thin-budget branch stays `'ask'` in BOTH modes: it is a budget question, not
+irreversibility. Under `bypassPermissions`, defer already denies, so ADR-13's semantics
+are preserved unchanged.
+
+**Why:** `'ask'` stalls an unattended loop until a human answers — in exactly the session
+nobody is watching, the prompt just parks the goal mid-climb. Deny is strictly SAFER than
+ask: the action never runs, the arrest is never weakened, and the guidance keeps the
+model making sandbox-safe progress while the human reviews everything in one batch at
+convergence instead of being paged per action. The default stays `'ask'` because ADR-3's
+posture — the human decides, live — is right for every attended session; defer is the
+explicit opt-in for unattended runs. Because no decision ever reads the queue, a
+hostile/corrupt/deleted `pending.json` degrades to "0 pending" (ADR-4) and no loop
+machinery can launder an approval through it — a queue entry is a reminder, never a
+permission. A failed queue append never drops the deny (the arrest lands even when the
+bookkeeping doesn't).
+
+**Known limitation (accepted):** `appendPending` is a lockless read-modify-write — two
+hook invocations racing in the same instant can lose one entry (last-writer-wins; the
+rename keeps the file uncorrupted and both denies still fire). Accepted because the queue
+is presentation metadata, distinct-entry races require two gate hits in the same moment,
+and a lockfile in a never-crash hook path buys little for its failure modes. Revisit with
+an append-only `pending.jsonl` if real losses are ever observed.
+
 ## Non-ADR notes
 
 - **Compliance line (from the mission):** official surfaces only — Stop and PreToolUse
