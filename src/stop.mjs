@@ -102,7 +102,10 @@ export function decideStop(_p, k, budget, cfg, entry, nowSec = Date.now() / 1000
       kind: 'stale-block',
       save: true,
       entry: { ...entry, staleBlocked: true },
-      reason: capReason(`[belay] goal '${slug}' state is stale (${age}) — run goal_assess first to get ground truth, then act on the fresh verdict (never claim convergence without it).`),
+      reason: capReason(
+        `[belay] goal '${slug}' state is stale (${age}) — run goal_assess first to get ground truth, then act on the fresh verdict (never claim convergence without it). ` +
+          `Feasibility check while you are at it: if that baseline shows a criterion NO action from this session could ever make pass (probe structurally broken, contradictory assertions, target outside your control), do not start the work — mark the goal blocked or abandoned in keyoku (goal_update) with the reason; belay releases the hold on any non-active goal.`
+      ),
     };
   }
 

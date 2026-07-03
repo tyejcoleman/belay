@@ -95,6 +95,43 @@ const refuse = (error) => ({ ok: false, error });
  *          schema, verbatim. Default scope 'session' REQUIRES session_id (ADR-14).
  * @returns {Promise<object>} { ok:true, goal, status, next } | { ok:false, step, error }
  */
+/** Provably-unsatisfiable criterion pairs: two assertions on the SAME probe and path that
+ *  no single output can satisfy. Deliberately conservative — only contradictions that hold
+ *  for EVERY possible probe output are flagged; anything weaker is the agent's
+ *  baseline-assess judgment, not belay's. Returns [{criteria:[i,j], why}]. */
+export function findContradictions(criteria) {
+  if (!Array.isArray(criteria)) return [];
+  const numv = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  const oneWay = (a, b) => {
+    if (a.op === 'eq' && b.op === 'eq' && !same(a.value, b.value)) return 'eq on two different values';
+    if (a.op === 'eq' && b.op === 'ne' && same(a.value, b.value)) return 'eq and ne on the same value';
+    if (a.op === 'contains' && b.op === 'not_contains' && same(a.value, b.value)) return 'contains and not_contains the same value';
+    if (a.op === 'exists' && b.op === 'not_exists') return 'exists and not_exists';
+    if (a.op === 'truthy' && b.op === 'falsy') return 'truthy and falsy';
+    const av = numv(a.value);
+    const bv = numv(b.value);
+    const isLower = a.op === 'gt' || a.op === 'gte';
+    const isUpper = b.op === 'lt' || b.op === 'lte';
+    if (av != null && bv != null && isLower && isUpper && (av > bv || (av === bv && (a.op === 'gt' || b.op === 'lt')))) {
+      return `disjoint numeric ranges (${a.op} ${av} vs ${b.op} ${bv})`;
+    }
+    return null;
+  };
+  const rows = criteria
+    .map((c, i) => ({ i, probe: JSON.stringify(c?.probe ?? null), path: typeof c?.assert?.path === 'string' && c.assert.path ? c.assert.path : 'output', a: c?.assert }))
+    .filter((r) => r.probe !== 'null' && r.a && typeof r.a.op === 'string');
+  const out = [];
+  for (let x = 0; x < rows.length; x++) {
+    for (let y = x + 1; y < rows.length; y++) {
+      if (rows[x].probe !== rows[y].probe || rows[x].path !== rows[y].path) continue;
+      const why = oneWay(rows[x].a, rows[y].a) || oneWay(rows[y].a, rows[x].a);
+      if (why) out.push({ criteria: [rows[x].i, rows[y].i], why });
+    }
+  }
+  return out;
+}
+
 export async function loopCreate(args = {}) {
   const steps = [];
   const fail = (step, error) => ({ ok: false, step, error, steps });
@@ -153,6 +190,20 @@ export async function loopCreate(args = {}) {
       return fail('resolve', 'inline payload is not JSON-serializable');
     }
     if (size > INLINE_PAYLOAD_CAP) return fail('resolve', `inline payload is ${size} bytes — over the 64KB cap`);
+  }
+
+  // 1c — feasibility screen: provably-unsatisfiable criteria refuse BEFORE any spawn or
+  // write (a loop that can never converge must be called out before work starts, not at
+  // the continuation cap). Deterministic contradictions only; semantic infeasibility is
+  // judged by the agent at the mandatory baseline assess (the stale-block wording directs
+  // it to stand down via blocked/abandoned, which decideStop already releases).
+  const impossible = findContradictions(ref ? row?.criteria : args.criteria);
+  if (impossible.length) {
+    const detail = impossible.map((c) => `criteria[${c.criteria[0]}] vs criteria[${c.criteria[1]}]: ${c.why}`).join('; ');
+    return fail(
+      'feasibility',
+      `criteria are logically unsatisfiable — the same probe output can never pass both: ${sanitizeText(detail, 400)}. Nothing was created or focused. Fix or drop one side of each contradiction and retry`
+    );
   }
 
   // 1b/2/3 — all keyoku writes on ONE short-lived registered-server child (ADR-10).
