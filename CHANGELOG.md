@@ -8,6 +8,37 @@
 > feeds rope, the PreToolUse gate is the fall-arrest. **Entries below this line predate the
 > rename and name the tool "conductor"; they are kept verbatim as accurate history.**
 
+## Unreleased
+
+### Stage-2 learned-adjudicator hook — refine-only, fail-safe-first (ADR-17)
+
+- **New config keys** `slm_enabled` (default **false**), `slm_url` (default
+  `http://127.0.0.1:8642/adjudicate`), `slm_timeout_ms` (1500, floor 100 — the L2-5
+  lesson) and `slm_min_confidence` (0.9, range 0..1) — all validated defensively; bad
+  values fall back to defaults with a doctor warning.
+- **Stage 2 in `hookPreToolUse` only** (`decideGate` stays pure and is behaviorally
+  untouched with `slm_enabled: false`): after a stage-1 hit on a **SOFT** class
+  (`rm -rf outside cwd`, `network write`, config `ask_patterns` classes), the hook POSTs
+  the CGS `GATE-ADJUDICATOR-PLAN.md` §3 request to the local adjudicator daemon
+  (zero-dep `node:http`, AbortController hard timeout) and merges the verdict through
+  the new pure `mergeVerdict`: a well-formed, non-abstaining `allow` at/above
+  `slm_min_confidence` passes silently (nothing queued); a `defer` verdict maps onto the
+  ADR-16 defer-queue deny (only in `gate_mode: 'defer'`); anything else — malformed,
+  abstain, low confidence, `ask`, timeout, non-200, bad JSON, daemon absent — degrades
+  to the stage-1 decision **byte-identically**.
+- **HARD classes** (`git push`, `npm publish`, `gh mutation`, `external send/publish`;
+  exported as `HARD_CLASSES` alongside `SOFT_CLASSES`) are never sent to the daemon and
+  can never be unlocked — a forged `{verdict:'allow', confidence:1}` changes nothing.
+  Stage 2 also never runs under `bypassPermissions` (the ADR-13 deny stays final) or for
+  the spawn-budget ask. The daemon is **untrusted input**: structural response
+  validation, 64KB body cap, and ADR-7 sanitization of any rationale.
+- **`test/gate-slm.test.mjs`** — 17 tests against an in-test mock daemon: byte-identical
+  output with `slm_enabled: false`, byte-identical stage-1 fallback with the daemon
+  STOPPED (the plan's convergence criterion c7), HARD-class forgery resistance, the
+  calibrated SOFT-allow path (incl. defer-mode un-queueing), every degrade shape, the §3
+  request contract, and `mergeVerdict` unit cases.
+- Version intentionally NOT bumped: 0.4.0 ships when the trained adapter lands.
+
 ## 0.3.0 — 2026-07-02
 
 ### gate_mode 'defer' — deny-with-guidance + a pending queue for one batched review (ADR-16)

@@ -1,4 +1,6 @@
 import { resolve } from 'node:path';
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import { readStdin, readConfig, toRegExp, capReason, sanitizeText } from './util.mjs';
 import { readKeyoku } from './keyoku.mjs';
 import { readBudget } from './budget.mjs';
@@ -11,8 +13,25 @@ import { appendPending } from './pending.mjs';
 // question gets asked) — or, under gate_mode 'defer' (ADR-16), are DENIED with guidance
 // and queued for one batched human review at convergence (strictly safer than ask; the
 // arrest is never weakened). Everything unmatched exits silently.
+//
+// Stage 2 (ADR-17, opt-in via slm_enabled): after a SOFT-class stage-1 hit, the hook —
+// never the pure decideGate — consults a local learned adjudicator daemon (the CGS
+// GATE-ADJUDICATOR-PLAN §3 contract) that may REFINE the decision: a well-formed,
+// non-abstaining, high-confidence 'allow' lifts a provable over-ask (mktemp rm -rf,
+// localhost-ambiguous curl). HARD classes are never sent to the daemon and never
+// unlockable; on ANY failure (daemon absent, timeout, non-200, bad JSON) the stage-1
+// decision stands byte-identically.
 
 export const SPAWN_TOOLS = ['Task', 'Agent', 'Workflow'];
+
+// ── ADR-17 class split — enforced in code, never by the model ─────────────────────────
+// HARD: irreversible/externally-visible actions the learned adjudicator can NEVER unlock.
+// The daemon is not even consulted for these (pointless + latency): stage 1 is final.
+export const HARD_CLASSES = new Set(['git push', 'npm publish', 'gh mutation', 'external send/publish']);
+// SOFT: classes where stage 1 provably over-asks (unexpanded-$VAR rm -rf targets, curl
+// pipelines with no parseable URL) and a calibrated verdict may refine. SOFT is defined
+// as NOT-HARD: these two built-ins plus every config ask_patterns class.
+export const SOFT_CLASSES = new Set(['rm -rf outside cwd', 'network write']);
 
 // git/gh/npm mutations that must route to the human. Classified by TOKENS (not a regex
 // anchored to "binary immediately followed by subcommand") so a GLOBAL OPTION can't smuggle
@@ -192,13 +211,18 @@ export function decideGate(p, k, budget, cfg) {
         decision: 'deny',
         reason: capReason(`[belay] '${sanitizeText(hit.class, 40)}' action deferred under autonomous goal — queued for batched human approval at convergence; continue with sandbox-safe work (gate_mode: defer)`),
         defer: { class: hit.class, tool_name: name, command: (detail || '').slice(0, 500) },
+        hit: { class: hit.class },
       };
     }
     // class/note can originate from config ask_patterns (a file), so they never land raw
     // in a model-visible reason (ADR-7).
+    // `hit` is hook-internal routing metadata like `defer` — it never reaches stdout; the
+    // stage-2 adjudicator branch keys on it (ADR-17). escalateForBypass intentionally
+    // rebuilds the decision without it: a bypass-escalated deny is never SLM-refinable.
     return escalateForBypass(p, {
       decision: 'ask',
       reason: capReason(`[belay] '${sanitizeText(hit.class, 40)}' action under autonomous goal — requires human approval (goal constraint policy)${hit.note ? ` — ${sanitizeText(hit.note, 120)}` : ''}`),
+      hit: { class: hit.class },
     });
   }
 
@@ -217,6 +241,112 @@ export function decideGate(p, k, budget, cfg) {
   return null;
 }
 
+// ── Stage 2: learned adjudicator (ADR-17) ──────────────────────────────────────────────
+
+/** Structural check on the daemon's §3 response. The daemon is UNTRUSTED input: anything
+ *  that is not exactly {verdict: allow|defer|ask, confidence: finite 0..1, abstain: bool}
+ *  is malformed and merges as "stage 1 stands". */
+function wellFormedVerdict(r) {
+  return (
+    r !== null &&
+    typeof r === 'object' &&
+    !Array.isArray(r) &&
+    (r.verdict === 'allow' || r.verdict === 'defer' || r.verdict === 'ask') &&
+    typeof r.confidence === 'number' &&
+    Number.isFinite(r.confidence) &&
+    r.confidence >= 0 &&
+    r.confidence <= 1 &&
+    typeof r.abstain === 'boolean'
+  );
+}
+
+/**
+ * Pure merge of the stage-1 decision with the (untrusted) SLM response — refine-only,
+ * fail-safe-first (ADR-17). Returns null (allow, silent) or a decision object; every
+ * degrade path returns `stage1Decision` ITSELF, so the fallback is byte-identical.
+ *
+ * - HARD class (or unclassifiable): stage-1 decision unchanged, ALWAYS — a well-formed
+ *   rationale may ride along for the human (sanitized + capped, ADR-7), never a changed
+ *   decision. (The hook never consults the daemon for HARD classes; this branch is
+ *   defense-in-depth for direct callers.)
+ * - SOFT class: 'allow' is accepted ONLY when the response is well-formed AND
+ *   abstain === false AND confidence >= cfg.slm_min_confidence. 'defer' is accepted only
+ *   when gate_mode is 'defer' — where the stage-1 decision already IS the ADR-16
+ *   defer-queue deny, so accepting it returns that same decision (queue entry included);
+ *   outside defer mode it degrades to stage-1. Everything else (malformed, abstain,
+ *   low confidence, 'ask') → stage-1.
+ */
+export function mergeVerdict(stage1Hit, stage1Decision, slmResponse, cfg) {
+  const cls = stage1Hit && typeof stage1Hit.class === 'string' ? stage1Hit.class : '';
+  const ok = wellFormedVerdict(slmResponse);
+  if (!cls || HARD_CLASSES.has(cls)) {
+    if (ok && stage1Decision && typeof slmResponse.rationale === 'string' && slmResponse.rationale) {
+      return { ...stage1Decision, reason: capReason(`${stage1Decision.reason} [slm: ${sanitizeText(slmResponse.rationale, 200)}]`) };
+    }
+    return stage1Decision;
+  }
+  if (!ok || slmResponse.abstain !== false) return stage1Decision;
+  if (slmResponse.verdict === 'allow' && slmResponse.confidence >= cfg.slm_min_confidence) return null;
+  if (slmResponse.verdict === 'defer' && cfg.gate_mode === 'defer') return stage1Decision; // the ADR-16 defer deny (+queue) IS the accepted outcome
+  return stage1Decision; // 'ask', 'defer' outside defer mode, low-confidence 'allow'
+}
+
+/** POST the §3 request to the adjudicator daemon. Resolves the parsed response object,
+ *  or null on ANY failure — timeout (AbortController hard cap), connection refused,
+ *  non-200, oversized body, bad JSON. NEVER rejects and never throws: null means
+ *  "stage 1 stands" (ADR-17 fail-safe). */
+function adjudicate(url, body, timeoutMs) {
+  return new Promise((resolvePromise) => {
+    let timer = null;
+    let settled = false;
+    const done = (v) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolvePromise(v);
+    };
+    try {
+      const u = new URL(url);
+      const ac = new AbortController();
+      // Hard timeout: resolve null immediately AND abort the socket — the hook never
+      // waits past slm_timeout_ms no matter what the daemon does.
+      timer = setTimeout(() => {
+        done(null);
+        ac.abort();
+      }, timeoutMs);
+      const req = (u.protocol === 'https:' ? httpsRequest : httpRequest)(u, { method: 'POST', headers: { 'content-type': 'application/json' }, signal: ac.signal }, (res) => {
+        if (res.statusCode !== 200) {
+          res.resume();
+          done(null);
+          return;
+        }
+        let raw = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => {
+          raw += c;
+          if (raw.length > 64 * 1024) {
+            done(null); // a verdict is ~200 bytes; a flooding daemon is malformed input
+            ac.abort();
+          }
+        });
+        res.on('error', () => done(null));
+        res.on('end', () => {
+          try {
+            const o = JSON.parse(raw);
+            done(o && typeof o === 'object' && !Array.isArray(o) ? o : null);
+          } catch {
+            done(null);
+          }
+        });
+      });
+      req.on('error', () => done(null));
+      req.end(JSON.stringify(body));
+    } catch {
+      done(null);
+    }
+  });
+}
+
 export async function hookPreToolUse() {
   const p = await readStdin();
   try {
@@ -225,8 +355,31 @@ export async function hookPreToolUse() {
     const k = readKeyoku({ sessionId: p.session_id, cwd: p.cwd });
     if (!k.present || k.paused || !k.focus || !k.matched || !k.goal) return;
     const budget = SPAWN_TOOLS.includes(p.tool_name) ? readBudget(p.session_id) : null;
-    const d = decideGate(p, k, budget, cfg);
+    let d = decideGate(p, k, budget, cfg);
     if (!d) return;
+    // Stage 2 (ADR-17): consult the learned adjudicator ONLY for a SOFT-class hit with
+    // slm_enabled — never for HARD classes (not unlockable, so the call is pure latency),
+    // never for the spawn-budget ask (no `hit`), and never under bypassPermissions (the
+    // one mode where no prompt of any kind reaches a human, the ADR-13 deny stays final).
+    // decideGate itself stays pure: the network call lives here, in the hook, only.
+    if (cfg.slm_enabled && d.hit && !HARD_CLASSES.has(d.hit.class) && p.permission_mode !== 'bypassPermissions') {
+      const command = typeof p.tool_input?.command === 'string' ? p.tool_input.command : '';
+      const slm = await adjudicate(
+        cfg.slm_url,
+        {
+          v: 1,
+          tool_name: typeof p.tool_name === 'string' ? p.tool_name : '',
+          command,
+          cwd: typeof p.cwd === 'string' ? p.cwd : '',
+          stage1: { class: d.hit.class, decision: d.decision },
+          goal: { id: k.goal.id, autonomy: k.goal.autonomy },
+          permission_mode: typeof p.permission_mode === 'string' ? p.permission_mode : 'default',
+        },
+        cfg.slm_timeout_ms
+      );
+      d = mergeVerdict(d.hit, d, slm, cfg);
+      if (!d) return; // calibrated SOFT allow — silent, and nothing is queued
+    }
     if (d.defer) {
       // Queue the deferred action for the batched review (ADR-16). Its own try/catch:
       // the queue is presentation metadata, and a failed append must NEVER drop the deny

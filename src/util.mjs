@@ -134,6 +134,10 @@ export const CONFIG_DEFAULTS = {
   gate_mode: 'ask', // 'ask' routes irreversible classes to the human live; 'defer' denies-with-guidance and queues them for one batched review at convergence (ADR-16)
   ask_patterns: [], // extra [{pattern, class, note}] — tested against BOTH tool_name and Bash command
   allow_overrides: [], // [pattern] force-allow, matched before any ask class
+  slm_enabled: false, // stage-2 learned adjudicator (ADR-17): opt-in; SOFT classes only; fail-safe = stage-1
+  slm_url: 'http://127.0.0.1:8642/adjudicate', // local adjudicator daemon endpoint (CGS GATE-ADJUDICATOR-PLAN §3)
+  slm_timeout_ms: 1500, // hard AbortController cap on the stage-2 POST; on breach the stage-1 decision stands
+  slm_min_confidence: 0.9, // a SOFT-class 'allow' verdict is accepted only at/above this confidence (calibrated τ)
   proposals_enabled: true, // master switch for the proposal scan + SessionStart surfacing (DESIGN.md §3.5)
   proposal_max_surfaced: 3, // proposals per SessionStart injection
   stale_converged_days: 7, // converged goals older than this become re-assess proposals
@@ -156,20 +160,39 @@ export function validateConfig(raw) {
   if (typeof raw !== 'object' || Array.isArray(raw)) {
     return { cfg, warnings: ['config.json is not a JSON object — using defaults'] };
   }
-  for (const key of ['max_continuations', 'budget_floor_pct', 'spawn_floor_pct', 'thin_budget_pct', 'stale_assess_min', 'proposal_max_surfaced', 'stale_converged_days', 'keyoku_call_timeout_ms']) {
+  for (const key of ['max_continuations', 'budget_floor_pct', 'spawn_floor_pct', 'thin_budget_pct', 'stale_assess_min', 'proposal_max_surfaced', 'stale_converged_days', 'keyoku_call_timeout_ms', 'slm_timeout_ms']) {
     if (raw[key] === undefined) continue;
     // keyoku_call_timeout_ms needs a sane floor (refute L2-5): 0 passed the >=0 check and
     // made EVERY keyoku RPC time out instantly (setTimeout(...,0) fires before spawn+SDK
     // startup ≈0.5-1s can possibly answer), deterministically breaking the write path
     // while doctor showed a valid config. Below 1000ms falls back like any bad field.
-    const min = key === 'keyoku_call_timeout_ms' ? 1000 : 0;
+    // slm_timeout_ms gets the same treatment at 100ms: an instant-abort timeout would
+    // silently disable stage 2 forever while doctor showed a valid config.
+    const min = key === 'keyoku_call_timeout_ms' ? 1000 : key === 'slm_timeout_ms' ? 100 : 0;
     if (typeof raw[key] === 'number' && Number.isFinite(raw[key]) && raw[key] >= min) cfg[key] = raw[key];
     else warnings.push(`config: ${key} must be a ${min > 0 ? `number >= ${min}` : 'non-negative number'} — using default ${CONFIG_DEFAULTS[key]}`);
   }
-  for (const key of ['gate_enabled', 'proposals_enabled']) {
+  for (const key of ['gate_enabled', 'proposals_enabled', 'slm_enabled']) {
     if (raw[key] === undefined) continue;
     if (typeof raw[key] === 'boolean') cfg[key] = raw[key];
     else warnings.push(`config: ${key} must be a boolean — using default ${CONFIG_DEFAULTS[key]}`);
+  }
+  if (raw.slm_url !== undefined) {
+    let ok = false;
+    if (typeof raw.slm_url === 'string' && raw.slm_url) {
+      try {
+        const u = new URL(raw.slm_url);
+        ok = u.protocol === 'http:' || u.protocol === 'https:';
+      } catch {
+        /* not a URL — falls back below */
+      }
+    }
+    if (ok) cfg.slm_url = raw.slm_url;
+    else warnings.push(`config: slm_url must be an http(s) URL — using default ${CONFIG_DEFAULTS.slm_url}`);
+  }
+  if (raw.slm_min_confidence !== undefined) {
+    if (typeof raw.slm_min_confidence === 'number' && Number.isFinite(raw.slm_min_confidence) && raw.slm_min_confidence >= 0 && raw.slm_min_confidence <= 1) cfg.slm_min_confidence = raw.slm_min_confidence;
+    else warnings.push(`config: slm_min_confidence must be a number between 0 and 1 — using default ${CONFIG_DEFAULTS.slm_min_confidence}`);
   }
   if (raw.gate_mode !== undefined) {
     if (raw.gate_mode === 'ask' || raw.gate_mode === 'defer') cfg.gate_mode = raw.gate_mode;

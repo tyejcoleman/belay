@@ -276,6 +276,33 @@ or stop decision** — no code path leads from `pending.json` to a decision (the
 no-path rule, mirrored), so a queue entry is a reminder, never a permission. The default
 stays `"ask"`.
 
+#### Learned adjudicator (stage 2, `slm_enabled`, ADR-17)
+
+Stage 1 (the table above) deliberately over-asks — `rm -rf "$SANDBOX"` on a mktemp dir
+and read-only `curl` pipelines are classified conservatively because provability, not
+intent, is the rule. With `slm_enabled: true`, the hook consults a **local
+learned-adjudicator daemon** (`POST` to `slm_url`, default
+`http://127.0.0.1:8642/adjudicate` — the JSON contract and training plan live in the
+context-graph-steward repo's `GATE-ADJUDICATOR-PLAN.md` §3) after a stage-1 hit, and may
+**refine** it — never expand it:
+
+- **HARD classes** (`git push`, `npm publish`, `gh mutation`, `external send/publish`)
+  are never sent to the daemon and can never be unlocked — stage 1 is final.
+- **SOFT classes** (`rm -rf outside cwd`, `network write`, your `ask_patterns` classes):
+  a well-formed, non-abstaining verdict of `allow` with
+  `confidence >= slm_min_confidence` passes silently; a `defer` verdict maps onto the
+  ADR-16 defer queue (only in `gate_mode: "defer"`); everything else keeps the stage-1
+  decision.
+- **Fail-safe = stage 1, byte-identically:** daemon stopped, slow (`slm_timeout_ms`
+  AbortController cap), non-200, malformed JSON, abstaining, or low-confidence — the
+  stage-1 decision goes out unchanged. The daemon is untrusted input: a compromised
+  daemon gets, at worst, today's behavior on HARD classes and a bounded SOFT allow.
+- Stage 2 never runs under `bypassPermissions` (the ADR-13 deny is final) and never for
+  the spawn-budget ask.
+
+Default **off** (`slm_enabled: false` — the gate is pure stage-1 regex, byte-identical
+to 0.3.0). Turn it on only when the adjudicator daemon is running.
+
 ### SessionStart briefing (`belay hook session-start`)
 
 Runs the proposal scan (pure file reads), persists it, and — only when open proposals
@@ -304,6 +331,11 @@ ever, from a hook. Errors are silent (never-crash rule).
     }
   ],
   "allow_overrides": [],         // regexes that force-allow before any ask class
+  "slm_enabled": false,          // stage-2 learned adjudicator (ADR-17): opt-in; refines SOFT
+                                 // classes only; any failure falls back to stage 1 byte-identically
+  "slm_url": "http://127.0.0.1:8642/adjudicate", // local adjudicator daemon (CGS GATE-ADJUDICATOR-PLAN §3)
+  "slm_timeout_ms": 1500,        // hard AbortController cap on the stage-2 call (min 100)
+  "slm_min_confidence": 0.9,     // SOFT-class 'allow' accepted only at/above this confidence (0..1)
   "proposals_enabled": true,     // master switch for the proposal scan + SessionStart surfacing
   "proposal_max_surfaced": 3,    // proposals per SessionStart injection
   "stale_converged_days": 7,     // converged goals older than this become re-assess proposals

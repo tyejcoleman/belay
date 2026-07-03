@@ -398,6 +398,44 @@ is presentation metadata, distinct-entry races require two gate hits in the same
 and a lockfile in a never-crash hook path buys little for its failure modes. Revisit with
 an append-only `pending.jsonl` if real losses are ever observed.
 
+## ADR-17 — the learned adjudicator is refine-only; fail-safe is stage 1; the daemon is untrusted
+
+**Decision:** The PreToolUse gate gains an opt-in **stage 2**: after a stage-1 hit, the
+hook (never the pure `decideGate`) may consult a local learned-adjudicator daemon
+(`POST slm_url`, the CGS `GATE-ADJUDICATOR-PLAN.md` §3 JSON contract; config
+`slm_enabled` default **false**, `slm_url` default `http://127.0.0.1:8642/adjudicate`,
+`slm_timeout_ms` 1500, `slm_min_confidence` 0.9). The class split is **enforced in code,
+never by the model**: **HARD classes** (`git push`, `npm publish`, `gh mutation`,
+`external send/publish`) are never sent to the daemon (pointless + latency) and are never
+unlockable — no SLM output can change their stage-1 decision (a well-formed rationale may
+be appended for the human, sanitized per ADR-7, decision untouched). **SOFT classes**
+(`rm -rf outside cwd`, `network write`, and every config `ask_patterns` class — soft is
+defined as *not hard*) may be refined by the pure `mergeVerdict`: an `allow` verdict is
+accepted ONLY when the response is well-formed AND `abstain === false` AND
+`confidence >= slm_min_confidence` (→ silent allow, nothing queued); a `defer` verdict is
+accepted only when `gate_mode` is `'defer'`, where the stage-1 ADR-16 defer-queue deny
+(queue entry included) is itself the accepted outcome; **everything else** — malformed,
+abstain, low confidence, `ask`, timeout (AbortController hard cap), non-200, bad JSON,
+oversized body, daemon absent — degrades to the stage-1 decision **byte-identically**
+(`mergeVerdict` returns the very same object). Stage 2 is also skipped for the
+spawn-budget ask (no class hit) and under `bypassPermissions`: the ADR-13 deny is final —
+the one mode where no prompt of any kind reaches a human is not softenable by a daemon.
+`decideGate` stays pure and behaviorally untouched when `slm_enabled` is false.
+
+**Why:** Stage 1's provability rule deliberately over-asks (the CGS census found real
+misfires: `rm -rf "$SANDBOX"` on mktemp dirs, read-only `curl` pipelines with no
+parseable URL), and in an unattended defer loop every over-ask parks real work in the
+review queue. A small calibrated local model can lift exactly the provable-over-ask cases
+— but it sits outside belay's trust boundary, so it is treated as **untrusted input**: an
+absent, slow, flooding, malformed, or fully **compromised** daemon gets, at worst,
+today's behavior on every HARD class and a bounded SOFT allow (one action stage 1 would
+have asked about runs) — never a new capability, never a weakened HARD arrest, never a
+prompt-injection channel (rationales pass through `sanitizeText`/`capReason`), and never
+a crash or a wedged hook (every failure path resolves within `slm_timeout_ms` and lands
+on stage 1, the ADR-4 posture). The fail-safe is provable and tested: with the daemon
+**stopped** and `slm_enabled: true`, gate output is byte-identical to 0.3.0 for every
+class (`test/gate-slm.test.mjs`, the plan's convergence criterion c7).
+
 ## Non-ADR notes
 
 - **Compliance line (from the mission):** official surfaces only — Stop and PreToolUse
