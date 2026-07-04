@@ -168,8 +168,26 @@ export function decideStop(_p, k, budget, cfg, entry, nowSec = Date.now() / 1000
   const unmetIds = Array.isArray(k.obs?.unmet) ? k.obs.unmet.filter((x) => typeof x === 'string') : [];
   const unmetHash = createHash('sha256').update(unmetIds.slice().sort().join(' ')).digest('hex').slice(0, 16);
   const sameUnmetCount = entry.lastUnmetHash === unmetHash ? (entry.sameUnmetCount ?? 0) + 1 : 1;
+
+  // Adaptive early release (ADR-21): a loop stuck on the SAME unmet set past thrash_release will
+  // not converge by continuing. The thrash_release-th block already delivered a model-visible
+  // escalation directive (the `stalled` branch below); THIS is the release the turn after, so
+  // the effective budget collapses to about thrash_release, far under max_continuations. Still an
+  // allow, so the ADR-6 block bound is unaffected; sameUnmetCount is persisted so it stays
+  // released (monotonic) until real progress resets the streak.
+  if (sameUnmetCount > cfg.thrash_release) {
+    return {
+      action: 'allow',
+      kind: 'thrash-exhausted',
+      save: true,
+      entry: { ...entry, lastUnmetHash: unmetHash, sameUnmetCount },
+      note: `[belay] goal '${slug}' stalled: same unmet set for ${sameUnmetCount} assessments, no progress; releasing the hold (mark the goal blocked/abandoned in keyoku or escalate to a human)`,
+    };
+  }
+
   const nextContinuations = entry.continuations + 1;
   const lastHeld = nextContinuations >= cfg.max_continuations; // this is the final held block before release
+  const stalled = sameUnmetCount >= cfg.thrash_release; // the escalation block; the release follows next turn
   const thrashing = sameUnmetCount >= cfg.thrash_threshold;
 
   let guidance;
@@ -178,6 +196,8 @@ export function decideStop(_p, k, budget, cfg, entry, nowSec = Date.now() / 1000
     // released silently (the exhaustion note goes to stderr, which it never sees) and writes a
     // confident summary of an unconverged task.
     guidance = `This is your LAST held continuation (${nextContinuations}/${cfg.max_continuations}) and the goal is NOT converged. Before you stop: run goal_assess for the true state, goal_record the specific blockers, checkpoint via tokenroom handoff/plan_resume, and write a short summary a human can act on — do NOT claim success. After this the hold releases.`;
+  } else if (stalled) {
+    guidance = `You have been stuck on the SAME unmet set for ${sameUnmetCount} assessments. This approach will not converge: STAND DOWN this turn — mark the goal blocked or abandoned in keyoku (goal_update) with the concrete blocker, or escalate to a human with a summary of what is stuck and why. belay RELEASES the hold on your next stop regardless; do not keep repeating the same attempt.`;
   } else if (thrashing) {
     guidance = `These SAME criteria have not moved across ${sameUnmetCount} assessments — your current approach is not working. STOP repeating it: run the failing probe yourself, read its ACTUAL output, goal_record the diagnosis, then CHANGE strategy. If the next assessment still shows no change, mark the goal blocked or abandoned in keyoku (goal_update) with the reason — belay releases the hold on any non-active goal.`;
   } else {
@@ -189,7 +209,7 @@ export function decideStop(_p, k, budget, cfg, entry, nowSec = Date.now() / 1000
 
   return {
     action: 'block',
-    kind: thrashing && !lastHeld ? 'block-thrash' : 'block',
+    kind: lastHeld ? 'block' : stalled ? 'block-stalled' : thrashing ? 'block-thrash' : 'block',
     save: true,
     entry: { ...entry, continuations: nextContinuations, lastUnmetHash: unmetHash, sameUnmetCount },
     reason: capReason(`[belay] goal '${slug}' not converged — unmet: ${unmetStr}. ${guidance}${budgetLine(budget, cfg)}`),

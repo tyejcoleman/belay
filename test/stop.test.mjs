@@ -519,3 +519,21 @@ test('final held continuation emits a wrap-up directive, not a silent release', 
   assert.match(b2.reason, /do NOT claim success/);
   assert.equal(stop(h, stopPayload({ stop_hook_active: true })).stdout, ''); // then release
 });
+
+test('adaptive escalation: a stalled loop gets an escalation block then RELEASES early, under max_continuations', () => {
+  const h = homes();
+  writeKeyoku(h, { goals: [goal()], focus: focusFor(), obsLines: [obs()] });
+  writeTokenroom(h, { leftPct: 72 });
+  mkdirSync(h.belay, { recursive: true });
+  writeFileSync(join(h.belay, 'config.json'), JSON.stringify({ thrash_threshold: 2, thrash_release: 4, max_continuations: 25 }));
+  for (let i = 0; i < 3; i++) assert.equal(JSON.parse(stop(h, stopPayload({ stop_hook_active: i > 0 })).stdout).decision, 'block'); // blocks 1..3
+  const b4 = JSON.parse(stop(h, stopPayload({ stop_hook_active: true })).stdout); // block 4 = escalation
+  assert.equal(b4.decision, 'block');
+  assert.match(b4.reason, /STAND DOWN this turn/);
+  assert.match(b4.reason, /RELEASES the hold on your next stop/);
+  const r5 = stop(h, stopPayload({ stop_hook_active: true })); // block 5 → release
+  assert.equal(r5.stdout, '');
+  assert.match(r5.stderr, /stalled: same unmet set for 5 assessments/);
+  const st = JSON.parse(readFileSync(join(h.belay, 'state.json'), 'utf8'));
+  assert.ok(st.sessions.s1.continuations < 25, `should release under the cap, got ${st.sessions.s1.continuations}`);
+});

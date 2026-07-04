@@ -475,7 +475,21 @@ export async function loopDisarm({ goal } = {}) {
   delete state.loops[goalId];
   state.loops = pruneLoops(state.loops, goals);
   writeLoopsState(state.loops);
-  const res = { ok: true, goalId, disarmed: true, unfocused };
+
+  // Learning flywheel (ADR-21): capture the loop's retro to belay's own store on stand-down —
+  // telemetry belay alone holds (which loops thrashed/stalled/converged). Pure local write, no
+  // spawn, best-effort; never blocks or fails a disarm. Feeding keyoku is the explicit
+  // `belay loop retro <goal>` action, not this hot path.
+  let retro = null;
+  try {
+    const { buildRetro, writeRetro } = await import('./retro.mjs');
+    retro = buildRetro(goalId);
+    if (retro) writeRetro(retro);
+  } catch {
+    /* retro is telemetry — never blocks a disarm */
+  }
+
+  const res = { ok: true, goalId, disarmed: true, unfocused, ...(retro ? { retro } : {}) };
   if (focusChanged) {
     res.note = "focus moved to another goal between resolve and unfocus — left untouched (belay never blind-clears someone else's focus); this goal's arm state was still cleared";
   }

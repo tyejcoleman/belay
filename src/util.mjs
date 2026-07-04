@@ -131,6 +131,7 @@ export const CONFIG_DEFAULTS = {
   thin_budget_pct: 15, // below this the block reason switches to descent wording
   stale_assess_min: 60, // observations older than this get one "run goal_assess first" block, then allow
   thrash_threshold: 3, // identical-unmet blocks before the Stop reason switches to "change strategy" guidance (ADR-21)
+  thrash_release: 8, // identical-unmet blocks before belay escalates then RELEASES a stalled loop early (adaptive budget, ADR-21) — well under max_continuations
   gate_enabled: true, // PreToolUse policy gate master switch
   gate_mode: 'ask', // 'ask' routes irreversible classes to the human live; 'defer' denies-with-guidance and queues them for one batched review at convergence (ADR-16)
   ask_patterns: [], // extra [{pattern, class, note}] — tested against BOTH tool_name and Bash command
@@ -162,7 +163,7 @@ export function validateConfig(raw) {
   if (typeof raw !== 'object' || Array.isArray(raw)) {
     return { cfg, warnings: ['config.json is not a JSON object — using defaults'] };
   }
-  for (const key of ['max_continuations', 'budget_floor_pct', 'spawn_floor_pct', 'thin_budget_pct', 'stale_assess_min', 'thrash_threshold', 'proposal_max_surfaced', 'stale_converged_days', 'keyoku_call_timeout_ms', 'slm_timeout_ms']) {
+  for (const key of ['max_continuations', 'budget_floor_pct', 'spawn_floor_pct', 'thin_budget_pct', 'stale_assess_min', 'thrash_threshold', 'thrash_release', 'proposal_max_surfaced', 'stale_converged_days', 'keyoku_call_timeout_ms', 'slm_timeout_ms']) {
     if (raw[key] === undefined) continue;
     // keyoku_call_timeout_ms needs a sane floor (refute L2-5): 0 passed the >=0 check and
     // made EVERY keyoku RPC time out instantly (setTimeout(...,0) fires before spawn+SDK
@@ -170,7 +171,7 @@ export function validateConfig(raw) {
     // while doctor showed a valid config. Below 1000ms falls back like any bad field.
     // slm_timeout_ms gets the same treatment at 100ms: an instant-abort timeout would
     // silently disable stage 2 forever while doctor showed a valid config.
-    const min = key === 'keyoku_call_timeout_ms' ? 1000 : key === 'slm_timeout_ms' ? 100 : key === 'thrash_threshold' ? 2 : 0;
+    const min = key === 'keyoku_call_timeout_ms' ? 1000 : key === 'slm_timeout_ms' ? 100 : key === 'thrash_threshold' || key === 'thrash_release' ? 2 : 0;
     if (typeof raw[key] === 'number' && Number.isFinite(raw[key]) && raw[key] >= min) cfg[key] = raw[key];
     else warnings.push(`config: ${key} must be a ${min > 0 ? `number >= ${min}` : 'non-negative number'} — using default ${CONFIG_DEFAULTS[key]}`);
   }

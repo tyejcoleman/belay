@@ -47,6 +47,16 @@ Driven by a 4-reviewer adversarial audit (hook-path, MCP/loops, effectiveness, t
   pathological goal (now O(n) via a Map + a 500-id cap, 21.6s→12ms); a silent hook-drop when
   `settings.json` had a non-object `hooks` (now refused); and shell line-continuation
   (`git \⏎push`) slipping the classifier (now normalized). New regression tests for each.
+- **Phase 3 — deeper autonomy (ADR-21):** an **adaptive budget** — a loop stuck on the same
+  unmet set past `thrash_release` (default 8) gets one model-visible escalation block ("stand
+  down / escalate") then releases early, so a hopeless loop stops at ~8 continuations instead of
+  grinding all 25 (still an allow, so the ADR-6 block bound is untouched — termination is
+  tighter). A **learning flywheel**: every disarm captures a loop retro (thrash / convergence /
+  continuations) to `~/.belay/retros.jsonl` — telemetry belay alone holds — and
+  `belay loop retro <goal>` files it into keyoku's knowledge store (via keyoku's own process) so
+  it grounds future `goal_assess` guidance. And a **probe-driven e2e** (`test/probe-e2e.test.mjs`
+  + a `probe-keyoku` fixture that actually RUNS the probe) that proves the whole loop flips from
+  block to allow on a real exit-code change, not a hand-written observation.
 - Version intentionally NOT bumped here; folds into the next release.
 
 ### Stage-2 learned-adjudicator hook — refine-only, fail-safe-first (ADR-17)

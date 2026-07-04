@@ -546,6 +546,20 @@ of thousands of criteria could run it for ~21s, blowing the Stop hook's 10s time
 KILLED and the stop fails OPEN — the exact failure ADR-4/ADR-6 forbid. Fixed by indexing criteria
 in a Map (O(1) lookup) and capping materialized ids at 500; measured 21.6s → 12ms at 100k×100k.)*
 
+*(2026-07-03 Phase 3: three deeper-autonomy pieces. **Adaptive budget** — a loop stuck on the
+SAME unmet set past `thrash_release` (default 8) gets ONE model-visible escalation block, then
+`thrash-exhausted` releases it on the next stop, so a hopeless loop stops at ~8 continuations
+instead of 25. This is only ever an earlier ALLOW (never a later block), so ADR-6's block bound
+holds and termination is strictly tighter; `sameUnmetCount` is persisted so the release is
+monotonic until real progress resets the streak. **Learning flywheel** — every disarm writes a
+loop retro (thrash/convergence/continuations) to `~/.belay/retros.jsonl` (pure local, no spawn),
+and `belay loop retro <goal>` files it into keyoku's `knowledge_submit` via keyoku's own process
+(ADR-10, best-effort) so belay's unique telemetry grounds future `goal_assess` guidance — keyoku
+stays the single brain (ADR-9), belay only contributes an observation it alone holds; no new MCP
+tool (the 7-tool surface stays frozen). **Probe-driven e2e** — a `probe-keyoku` fixture that
+actually RUNS the criterion probe, so `test/probe-e2e.test.mjs` proves the loop flips block→allow
+on a real exit-code change, closing the test-review realism gap.)*
+
 ## Non-ADR notes
 
 - **Compliance line (from the mission):** official surfaces only — Stop and PreToolUse

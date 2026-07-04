@@ -87,8 +87,13 @@ switch (cmd) {
       printJSON((await import('../src/loops.mjs')).loopResume({ goal: f._[0] ?? f.goal }));
     } else if (sub === 'disarm') {
       printJSON(await (await import('../src/loops.mjs')).loopDisarm({ goal: f._[0] ?? f.goal }));
+    } else if (sub === 'retro') {
+      const { recordRetro, readRetros } = await import('../src/retro.mjs');
+      const goalRef = f._[0] ?? f.goal;
+      if (goalRef) printJSON(await recordRetro(goalRef, { push: f.no_push !== true })); // explicit retro pushes to keyoku unless --no-push
+      else printJSON({ retros: readRetros(typeof f.limit === 'string' ? Number(f.limit) : 20) });
     } else {
-      console.error(`belay loop <create|list|pause|resume|disarm> — see \`belay\` for usage`);
+      console.error(`belay loop <create|list|pause|resume|disarm|retro> — see \`belay\` for usage`);
       process.exitCode = 2;
     }
     break;
@@ -139,6 +144,8 @@ usage:
   belay loop pause <goal> [--note <text>]          pause the Stop-hook hold (the fall-arrest gate stays active)
   belay loop resume <goal>                         resume a paused loop (re-demands fresh goal_assess)
   belay loop disarm <goal>                         unfocus via keyoku + clear arm state (belay returns to no-op)
+  belay loop retro [<goal> [--no-push] | --limit n]  record a loop's retro (thrash/convergence telemetry); with a goal it also files
+                                                   the retro into keyoku's knowledge store (unless --no-push); no goal → list recent retros
   belay propose [--dismiss <id>]                   scan for loop-worthy signals; proposals are advisory, never auto-armed
   belay pending [--clear | --remove <id>]          review actions deferred by gate_mode 'defer' (denied + queued for batched approval)
   belay hook <stop|pre-tool-use|session-start>     (hook commands — wired by install)
