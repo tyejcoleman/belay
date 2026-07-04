@@ -335,7 +335,7 @@ test('bad slm config values fall back to defaults with doctor warnings; bad slm_
 // ── (f) mergeVerdict unit cases (pure function) ────────────────────────────────────────
 
 test('mergeVerdict: class split constants', () => {
-  assert.deepEqual([...HARD_CLASSES].sort(), ['external send/publish', 'gh mutation', 'git push', 'npm publish']);
+  assert.deepEqual([...HARD_CLASSES].sort(), ['control-file tampering', 'external send/publish', 'gh mutation', 'git push', 'loop control', 'npm publish']);
   assert.deepEqual([...SOFT_CLASSES].sort(), ['network write', 'rm -rf outside cwd']);
 });
 

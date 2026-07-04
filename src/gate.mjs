@@ -27,20 +27,34 @@ export const SPAWN_TOOLS = ['Task', 'Agent', 'Workflow'];
 // ── ADR-17 class split — enforced in code, never by the model ─────────────────────────
 // HARD: irreversible/externally-visible actions the learned adjudicator can NEVER unlock.
 // The daemon is not even consulted for these (pointless + latency): stage 1 is final.
-export const HARD_CLASSES = new Set(['git push', 'npm publish', 'gh mutation', 'external send/publish']);
+export const HARD_CLASSES = new Set(['git push', 'npm publish', 'gh mutation', 'external send/publish', 'loop control', 'control-file tampering']);
 // SOFT: classes where stage 1 provably over-asks (unexpanded-$VAR rm -rf targets, curl
 // pipelines with no parseable URL) and a calibrated verdict may refine. SOFT is defined
 // as NOT-HARD: these two built-ins plus every config ask_patterns class.
 export const SOFT_CLASSES = new Set(['rm -rf outside cwd', 'network write']);
 
-// git/gh/npm mutations that must route to the human. Classified by TOKENS (not a regex
-// anchored to "binary immediately followed by subcommand") so a GLOBAL OPTION can't smuggle
-// the subcommand past the check: `git -C DIR push`, `git --git-dir=x push`,
-// `gh -R owner/repo pr merge`, `env FOO=bar git push` all match now.
+// git/gh/npm mutations that must route to the human. WRAPPER-AWARE (ADR-18): the binary is
+// located by a whole-string scan (VCS_SCAN, mirroring RM_SCAN) regardless of shell wrapper
+// (`sh -c 'git push'`, `bash -lc`, `eval`, backticks, `$(…)`, `(subshell)`), quoting, or
+// chaining (`;`, `&&`, `||`, `|`, a lone `&`, newline) — the old segment-split token walk
+// only inspected the leading binary of each `&&`/`;`-delimited segment and let every wrapper
+// through. Deliberately OVER-asks (ADR-3: ask, not deny — a false ask is safe, a false allow
+// is a fall-arrest failure). Value-taking global options are still consumed so they cannot
+// smuggle the subcommand out of view: `git -C DIR push`, `gh -R owner/repo pr merge`.
 const GIT_GLOBAL_ARG = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--super-prefix']);
 const GH_GLOBAL_ARG = new Set(['-R', '--repo']);
 const GH_MUTATION_SUB = new Set(['pr', 'release', 'repo']);
 const GH_MUTATION_ACTION = new Set(['create', 'merge', 'edit', 'delete']);
+// `gh api` is the general mutation escape hatch: it defaults to GET, but a non-GET method or
+// any field/input flag forces a write (repo/release deletion or creation). Classify those.
+const GH_API_METHOD = /(?:^|\s)(?:-X|--method)[=\s]*['"]?(?:POST|PUT|PATCH|DELETE)\b/i;
+const GH_API_FIELD = /(?:^|\s)(?:-f|-F|--field|--raw-field|--input)\b/;
+
+// Locate git/npm/gh after any command boundary, behind any wrapper. Case-insensitive: a
+// case-insensitive FS (macOS default) resolves GIT/NPM/GH to the real binaries. The tail
+// runs to the next boundary — the RM_SCAN stop set plus `)` and quotes, so a `sh -c 'git
+// push'` tail ends at the closing quote instead of swallowing the rest of the line.
+const VCS_SCAN = /(?:^|[\s;|&`'"(=\\])(?:[\w./-]*\/)?(git|npm|gh)\b([^\n;|&`)'"]*)/gi;
 
 /** First non-option token at/after startIdx, skipping global options — and the SEPARATE
  *  argument of any option listed in takesArg. Returns { sub, idx } (idx = -1 if none). */
@@ -59,22 +73,32 @@ function nextSubcommand(tok, startIdx, takesArg) {
   return { sub: null, idx: -1 };
 }
 
-/** git push / npm publish / gh (pr|release|repo) (create|merge|edit|delete), or null. */
+/** git push / npm publish / gh (pr|release|repo) (create|merge|edit|delete) / gh api write,
+ *  found regardless of wrapper or quoting, or null. */
 function classifyVcs(command) {
-  for (const seg of command.split(/&&|\|\||[;|\n]/)) {
-    const tok = seg.trim().split(/\s+/).filter(Boolean);
-    let i = 0;
-    while (i < tok.length && (tok[i] === 'sudo' || tok[i] === 'command' || tok[i] === 'env' || tok[i] === 'nice' || /^[\w.]+=/.test(tok[i]))) i++;
-    const bin = (tok[i] || '').split('/').pop();
+  if (typeof command !== 'string' || !command) return null;
+  VCS_SCAN.lastIndex = 0;
+  let m;
+  while ((m = VCS_SCAN.exec(command))) {
+    const bin = m[1].toLowerCase();
+    const tok = m[2].trim().split(/\s+/).filter(Boolean);
     if (bin === 'git') {
-      if (nextSubcommand(tok, i + 1, GIT_GLOBAL_ARG).sub === 'push') return 'git push';
+      if (nextSubcommand(tok, 0, GIT_GLOBAL_ARG).sub === 'push') return 'git push';
     } else if (bin === 'npm') {
-      if (nextSubcommand(tok, i + 1, new Set()).sub === 'publish') return 'npm publish';
+      // `publish` as a standalone token anywhere in the tail — value-taking npm global
+      // options (`--registry <url> publish`, `--otp <code> publish`, `--workspace <w>
+      // publish`) take a SEPARATE argument a fixed option-set can't enumerate, so the old
+      // "first non-option token" walk returned the flag's value instead of `publish`.
+      if (tok.includes('publish')) return 'npm publish';
     } else if (bin === 'gh') {
-      const first = nextSubcommand(tok, i + 1, GH_GLOBAL_ARG);
+      const first = nextSubcommand(tok, 0, GH_GLOBAL_ARG);
       if (GH_MUTATION_SUB.has(first.sub)) {
         const action = nextSubcommand(tok, first.idx + 1, GH_GLOBAL_ARG);
         if (GH_MUTATION_ACTION.has(action.sub)) return 'gh mutation';
+      }
+      if (first.sub === 'api') {
+        const tail = tok.join(' ');
+        if (GH_API_METHOD.test(` ${tail}`) || GH_API_FIELD.test(` ${tail}`)) return 'gh mutation';
       }
     }
   }
@@ -86,10 +110,108 @@ function classifyVcs(command) {
 // are in-session coordination, not external side effects.
 const TOOLNAME_ASK = /^mcp__.*(send|publish|add_message|post_message|create_draft)/i;
 
+// Loop-control / verifier-integrity class (ADR-19): the tools that can REMOVE the arrest or
+// WEAKEN the success criteria that are holding the session. Gating them closes two holes at
+// once — (1) the self-liberation path (under bypassPermissions the model could disarm/unfocus
+// itself, no human ever contacted, then run the denied action into a now-inert gate), and
+// (2) verifier tampering (goal_update/converge/delete on the goal that holds it = editing the
+// test instead of doing the work). HARD class: never SLM-unlockable. Only ever fires while a
+// focused autonomous goal already exists, so normal keyoku use is untouched. goal_focus is
+// gated too (refute F1): re-focusing to a DIFFERENT goal displaces keyoku's singleton focus off
+// the arrest goal — self-liberation exactly like goal_unfocus. (belay's own loop create/disarm
+// reach keyoku through a spawned child, not a Claude Code tool call, so they are never gated by
+// this; only the model calling the tool directly is.)
+const LOOP_CONTROL_ASK = /^mcp__(belay__belay_loop_disarm|keyoku__goal_(focus|unfocus|update|converge|delete))\b/i;
+
+// Writes to belay's or keyoku's OWN control files (~/.belay, ~/.keyoku) are self-liberation by
+// another name (refute F1): `touch ~/.keyoku/paused` no-ops the whole harness, `> …/focus.json`
+// clears the arrest, `echo '{"gate_enabled":false}' > ~/.belay/config.json` disables the gate.
+// The model never needs to WRITE these under an autonomous loop (belay and keyoku own them), so
+// any write-ish command targeting them routes to the human. Pure reads are left alone.
+const CONTROL_DIR = /\.(keyoku|belay)\b/;
+const WRITE_UTIL = /(?:^|[\s;|&`(\\])(?:[\w./-]*\/)?(?:touch|rm|mv|cp|sed|tee|dd|ln|truncate|chmod|chown|install|unlink|shred|mkdir|rmdir|python3?|node|perl)\b/i;
+export function controlFileTamper(command) {
+  if (typeof command !== 'string' || !command) return false;
+  if (!CONTROL_DIR.test(command)) return false;
+  return /[12]?>>?/.test(command) || WRITE_UTIL.test(command); // a redirect, or a mutating utility, alongside the control dir
+}
+
+// ── Config-driven danger table (ADR-18) ────────────────────────────────────────────────
+// Beyond the bespoke git/npm/gh/curl/rm classifiers below (which need real argument parsing),
+// a DATA-DRIVEN table covers the long tail of irreversible/external CLIs by binary +
+// subcommand. Built-in defaults ship the clearly-irreversible verbs; the user extends the
+// table from ~/.belay/config.json `danger_binaries` (UNIONED in — a user's list ADDS to that
+// binary's built-in list, never dropping built-in coverage), so covering their stack
+// (aws, kubectl apply, psql, …)
+// is one config line, never a code change. `['*']` = the whole binary is dangerous (ask on
+// every invocation) — the right choice for CLIs where reads and writes share the command tree
+// (aws/gcloud/az). Over-asks by design (ADR-3). Left OUT of defaults on purpose: aws/gcloud/az
+// (too read-heavy to `*` by default) and kubectl apply/helm install (dev-common) — one line each.
+export const DEFAULT_DANGER_BINARIES = {
+  docker: ['push'],
+  podman: ['push'],
+  terraform: ['apply', 'destroy'],
+  tofu: ['apply', 'destroy'],
+  pulumi: ['up', 'destroy'],
+  kubectl: ['delete', 'drain'],
+  helm: ['uninstall', 'rollback'],
+  pnpm: ['publish'],
+  yarn: ['publish'],
+  bun: ['publish'],
+  hg: ['push'],
+  dvc: ['push'],
+  vercel: ['deploy', 'promote'],
+  netlify: ['deploy'],
+  flyctl: ['deploy'],
+  fly: ['deploy'],
+  wrangler: ['deploy', 'publish'],
+};
+
+/** Built-in danger table UNIONED with the user's config additions (per-binary the two lists
+ *  merge, so a user addition never drops built-in coverage for that binary). */
+function mergedDangerTable(cfg) {
+  const user = cfg && cfg.danger_binaries && typeof cfg.danger_binaries === 'object' && !Array.isArray(cfg.danger_binaries) ? cfg.danger_binaries : {};
+  const out = { ...DEFAULT_DANGER_BINARIES };
+  for (const [bin, subs] of Object.entries(user)) {
+    if (!Array.isArray(subs) || subs.length === 0) continue;
+    const key = bin.toLowerCase();
+    out[key] = out[key] ? [...new Set([...out[key], ...subs])] : [...subs];
+  }
+  return out;
+}
+
+// Any binary token after a command boundary, behind any wrapper. The match captures ONLY the
+// binary (no greedy tail): a greedy tail on a leading wrapper token (`env FOO=bar docker push`)
+// would swallow the real binary, so the scan must advance token-by-token and re-anchor on the
+// next boundary. The subcommand is read from the substring AFTER the match. Table lookup does
+// the filtering, so the broad per-token match is cheap.
+const DANGER_SCAN = /(?:^|[\s;|&`'"(=\\])(?:[\w./-]*\/)?([\w.-]+)\b/gi;
+const EMPTY_SET = new Set();
+
+/** Table-driven danger classification: a listed binary whose first subcommand is dangerous
+ *  (or whose whole invocation is, via `['*']`). Returns the class string or null. */
+function classifyDanger(command, cfg) {
+  if (typeof command !== 'string' || !command) return null;
+  const table = mergedDangerTable(cfg);
+  DANGER_SCAN.lastIndex = 0;
+  let m;
+  while ((m = DANGER_SCAN.exec(command))) {
+    const bin = m[1].toLowerCase();
+    const subs = table[bin];
+    if (!Array.isArray(subs) || subs.length === 0) continue;
+    if (subs.includes('*')) return bin; // whole-binary danger (e.g. a user's aws:['*'])
+    const rest = command.slice(m.index + m[0].length).split(/[\n;|&`)'"]/)[0]; // tail up to the next boundary
+    const tok = rest.trim().split(/\s+/).filter(Boolean);
+    const sub = (nextSubcommand(tok, 0, EMPTY_SET).sub || '').toLowerCase();
+    if (sub && subs.includes(sub)) return `${bin} ${sub}`;
+  }
+  return null;
+}
+
 // Locate every rm invocation regardless of shell wrapper or quoting: after a command
 // boundary / whitespace / quote / '(' / '=' , an optional path prefix (/bin/rm), then rm.
-// The captured tail runs to the next boundary (newline ; | & or backtick).
-const RM_SCAN = /(?:^|[\s;|&`'"(=])(?:[\w./-]*\/)?rm\b([^\n;|&`]*)/g;
+// Case-insensitive (a case-insensitive FS resolves RM). The tail runs to the next boundary.
+const RM_SCAN = /(?:^|[\s;|&`'"(=\\])(?:[\w./-]*\/)?rm\b([^\n;|&`]*)/gi;
 
 /**
  * rm -rf whose resolved target escapes the session cwd. Conservative + WRAPPER-AWARE
@@ -111,12 +233,15 @@ export function rmrfOutsideCwd(command, cwd) {
     const recursive = /[rR]/.test(short) || flags.includes('--recursive');
     const force = short.includes('f') || flags.includes('--force');
     if (!(recursive && force)) continue;
-    // xargs feeds rm's targets from stdin — the args we can see are not the real targets.
+    // xargs / find -exec feed rm's targets from ELSEWHERE — the args we can see ({} , the
+    // literal placeholders) are not the real targets, which can be anywhere on the filesystem.
     const preRun = command.slice(0, m.index).split(/[\n;|&`]/).pop() || '';
     if (/\bxargs\b/.test(preRun)) return true;
+    if (/\bfind\b[^\n]*-execdir?\b/i.test(preRun)) return true; // find … -exec rm -rf {} +
     const paths = toks.filter((t) => !t.startsWith('-'));
     if (paths.length === 0) return true; // no explicit target (stdin/xargs/redirect) → can't prove inside
     for (const t of paths) {
+      if (t === '{}' || t === '+' || t === ';') return true; // find -exec placeholder → real targets are find's matches
       if (/[$`]/.test(t)) return true; // unexpanded var/subshell target → treat as outside
       if (t === '/' || t.startsWith('~')) return true;
       if (!base) {
@@ -131,12 +256,20 @@ export function rmrfOutsideCwd(command, cwd) {
   return false;
 }
 
-/** curl/wget performing a POST/PUT (or body upload) to anything that isn't localhost. */
+/** curl/wget performing a non-GET / body-upload request to anything that isn't localhost.
+ *  Case-insensitive, and aware of curl's bundled (`-sX POST`) and attached (`-da=1`,
+ *  `-Tfile`) short options, plus DELETE/PATCH — not just POST/PUT. Over-asks (ADR-3). */
 export function externalNetworkWrite(command) {
-  if (!/\b(curl|wget)\b/.test(command)) return false;
-  const writey =
-    /(\s-X\s*['"]?(POST|PUT)\b|--request[=\s]+['"]?(POST|PUT)\b|--method[=\s]+['"]?(POST|PUT)\b|\s(-d|--data(-\w+)?|--json|--form|-F|--upload-file|-T|--post-data|--post-file|--body-data|--body-file)([=\s]|$))/i;
-  if (!writey.test(command)) return false;
+  if (typeof command !== 'string' || !command) return false;
+  const hasCurl = /\bcurl\b/i.test(command);
+  if (!hasCurl && !/\bwget\b/i.test(command)) return false;
+  const METHOD = /(?:^|\s)(?:-[a-zA-Z]*X|--request|--method)[=\s]*['"]?(?:POST|PUT|PATCH|DELETE)\b/i; // incl. bundled -sX / attached -XPOST
+  const LONG_BODY = /(?:^|\s)(?:--data\b|--data-\w+\b|--json\b|--form\b|--upload-file\b|--post-data\b|--post-file\b|--body-data\b|--body-file\b)/i;
+  // A curl short bundle whose flag chars include a body/form/upload flag (d/F/T) — the rest
+  // of the bundle is that flag's value. Curl-only: wget's -d/-F/-T mean debug/force-html/timeout.
+  const CURL_BUNDLE = /(?:^|\s)-[a-zA-Z]*[dFT]/;
+  const writey = METHOD.test(command) || LONG_BODY.test(command) || (hasCurl && CURL_BUNDLE.test(command));
+  if (!writey) return false;
   const urls = command.match(/https?:\/\/[^\s"']+/gi) || [];
   const local = /^https?:\/\/(localhost|127(\.\d{1,3}){3}|\[::1\]|0\.0\.0\.0)([:/?#]|$)/i;
   if (urls.length > 0 && urls.every((u) => local.test(u))) return false;
@@ -146,17 +279,29 @@ export function externalNetworkWrite(command) {
 /** First matching irreversible/external class, or null. Config ask_patterns are tested
  *  against BOTH the tool name and the Bash command string. */
 export function classify(name, command, cwd, cfg) {
-  if (command) {
-    const vcs = classifyVcs(command);
+  // Join shell line-continuations before scanning (refute F4): bash treats `\<newline>` as a
+  // single space, so `git \⏎push` is `git push` — otherwise the newline severs the subcommand.
+  const cmd = typeof command === 'string' ? command.replace(/\\\r?\n/g, ' ') : command;
+  if (cmd) {
+    const vcs = classifyVcs(cmd);
     if (vcs) return { class: vcs, note: null };
-    if (rmrfOutsideCwd(command, cwd)) return { class: 'rm -rf outside cwd', note: null };
-    if (externalNetworkWrite(command)) return { class: 'network write', note: null };
+    if (rmrfOutsideCwd(cmd, cwd)) return { class: 'rm -rf outside cwd', note: null };
+    if (externalNetworkWrite(cmd)) return { class: 'network write', note: null };
+    if (controlFileTamper(cmd)) return { class: 'control-file tampering', note: null };
   }
+  if (name && LOOP_CONTROL_ASK.test(name)) return { class: 'loop control', note: null };
   if (name && TOOLNAME_ASK.test(name)) return { class: 'external send/publish', note: null };
+  // User ask_patterns run BEFORE the built-in danger table so a user can customize the class
+  // label + note for a command the table would otherwise catch generically. They only ever
+  // ADD an ask, and the irreversible safety core above already ran, so nothing is downgraded.
   for (const p of cfg.ask_patterns) {
     const re = toRegExp(p.pattern);
     if (!re) continue;
-    if ((command && re.test(command)) || (name && re.test(name))) return { class: p.class || 'custom', note: p.note || null };
+    if ((cmd && re.test(cmd)) || (name && re.test(name))) return { class: p.class || 'custom', note: p.note || null };
+  }
+  if (cmd) {
+    const danger = classifyDanger(cmd, cfg);
+    if (danger) return { class: danger, note: null };
   }
   return null;
 }
@@ -165,14 +310,18 @@ export function classify(name, command, cwd, cfg) {
  *  shown (observed live 2026-07-02: the gate emitted ask, `git push --dry-run` executed
  *  anyway). ADR-3's contract is "the question gets asked"; when the harness cannot ask,
  *  the only way to keep the human in the loop is deny-with-instructions ("deny" IS
- *  enforced under bypass; "ask" is not). ADR-13. Note the instructions say DISARM, not
- *  pause: pausing releases only the rope, never the arrest (ADR-12). */
+ *  enforced under bypass; "ask" is not). ADR-13.
+ *
+ *  The guidance deliberately does NOT offer "disarm the loop, then retry" (ADR-19): that
+ *  path launders the arrest — disarm/unfocus are themselves loop-control actions gated here,
+ *  and standing the loop down does not make the irreversible action approved. The only honest
+ *  route is a session where a human can actually see the prompt. */
 function escalateForBypass(p, d) {
   if (!d || d.decision !== 'ask' || p.permission_mode !== 'bypassPermissions') return d;
   return {
     decision: 'deny',
     reason: capReason(
-      `${d.reason}. This session runs bypassPermissions, where an approval prompt cannot be shown — denied instead of silently allowed (ADR-13). To proceed: run this action from a session without bypassPermissions, or fully stand the loop down first (belay_loop_disarm / keyoku goal_unfocus — pause is NOT enough, it keeps the arrest) and retry.`
+      `${d.reason}. This session runs bypassPermissions, where an approval prompt cannot be shown — denied instead of silently allowed (ADR-13). To proceed, run this exact action from a session WITHOUT bypassPermissions. Standing the loop down does not make it approved (the arrest is not the obstacle — the absent human is), and loop-control actions like unfocus/disarm are gated here for the same reason (ADR-19).`
     ),
   };
 }

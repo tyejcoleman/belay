@@ -35,8 +35,9 @@ test('bypassPermissions escalates ask → deny (the harness cannot render an ask
   assert.equal(o.permissionDecision, 'deny');
   assert.match(o.permissionDecisionReason, /'git push'/);
   assert.match(o.permissionDecisionReason, /bypassPermissions/);
-  // the instructions must say DISARM, never pause (pause keeps the arrest — ADR-12/13)
-  assert.match(o.permissionDecisionReason, /belay_loop_disarm/);
+  // ADR-19: the deny must NOT advertise disarm-then-retry (that launders the arrest); it
+  // sends the human to a non-bypass session instead.
+  assert.match(o.permissionDecisionReason, /WITHOUT bypassPermissions/);
   assert.doesNotMatch(o.permissionDecisionReason, /belay_loop_pause/);
   // ungated commands stay silent even in bypass mode — no over-denying
   assert.equal(gate(h, toolPayload({ permission_mode: 'bypassPermissions', tool_input: { command: 'git commit -m wip' } })).stdout, '');

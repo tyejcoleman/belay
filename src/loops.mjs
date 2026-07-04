@@ -219,7 +219,10 @@ export async function loopCreate(args = {}) {
       try {
         out = await session.call('goal_create', createPayload);
       } catch (e) {
-        return fail('create', sanitizeText(e?.message ?? String(e), 300));
+        // Transport/timeout failure (NOT a keyoku validation error): keyoku persists the row
+        // BEFORE it responds and a timeout SIGKILLs the child after that, so the goal MAY
+        // exist despite this error (MCP-F5). Do not blind-retry — that duplicates the goal.
+        return fail('create', `${sanitizeText(e?.message ?? String(e), 220)} — the goal MAY have been created despite this error; check keyoku goal_list and create only if it is absent (a blind retry risks a duplicate goal)`);
       }
       if (out?.error) return fail('create', sanitizeText(String(out.error), 400)); // keyoku's own validation verdict, verbatim content (ADR-7 form)
       row = out?.goal;
@@ -230,7 +233,7 @@ export async function loopCreate(args = {}) {
       try {
         out = await session.call('goal_update', { goal: row.id, autonomy: 'autonomous' });
       } catch (e) {
-        return fail('autonomy', sanitizeText(e?.message ?? String(e), 300));
+        return fail('autonomy', `${sanitizeText(e?.message ?? String(e), 220)} — the goal's autonomy MAY have been raised to autonomous despite this error (MCP-F5); check keyoku goal_get before doing anything else`);
       }
       if (out?.error) return fail('autonomy', sanitizeText(String(out.error), 400));
       row = out?.goal && typeof out.goal.id === 'string' ? out.goal : { ...row, autonomy: 'autonomous' };
@@ -243,7 +246,9 @@ export async function loopCreate(args = {}) {
     try {
       out = await session.call('goal_focus', focusArgs);
     } catch (e) {
-      return fail('focus', sanitizeText(e?.message ?? String(e), 300));
+      // A focus that landed before the timeout means the Stop hold + fall-arrest are LIVE for
+      // the pinned session even though belay reports arming failed and wrote no loops.json entry.
+      return fail('focus', `${sanitizeText(e?.message ?? String(e), 200)} — the goal MAY have been focused despite this error (MCP-F5); if so the Stop hold and fall-arrest are already LIVE. Check belay_status before retrying, and belay_loop_disarm to stand down cleanly`);
     }
     if (out?.error) return fail('focus', sanitizeText(String(out.error), 400));
     steps.push({ step: 'focus', ok: true, cwd, ...(sessionId ? { session_id: sessionId } : {}) });

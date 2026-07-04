@@ -130,10 +130,12 @@ export const CONFIG_DEFAULTS = {
   spawn_floor_pct: 10, // below this (and no fresh alt profile) new Task/Agent/Workflow spawns route to the human
   thin_budget_pct: 15, // below this the block reason switches to descent wording
   stale_assess_min: 60, // observations older than this get one "run goal_assess first" block, then allow
+  thrash_threshold: 3, // identical-unmet blocks before the Stop reason switches to "change strategy" guidance (ADR-21)
   gate_enabled: true, // PreToolUse policy gate master switch
   gate_mode: 'ask', // 'ask' routes irreversible classes to the human live; 'defer' denies-with-guidance and queues them for one batched review at convergence (ADR-16)
   ask_patterns: [], // extra [{pattern, class, note}] — tested against BOTH tool_name and Bash command
   allow_overrides: [], // [pattern] force-allow, matched before any ask class
+  danger_binaries: {}, // {binary: [subcommands] | ['*']} — extends the built-in danger table (ADR-18); merged over gate.mjs DEFAULT_DANGER_BINARIES
   slm_enabled: false, // stage-2 learned adjudicator (ADR-17): opt-in; SOFT classes only; fail-safe = stage-1
   slm_url: 'http://127.0.0.1:8642/adjudicate', // local adjudicator daemon endpoint (CGS GATE-ADJUDICATOR-PLAN §3)
   slm_timeout_ms: 1500, // hard AbortController cap on the stage-2 POST; on breach the stage-1 decision stands
@@ -154,13 +156,13 @@ export function toRegExp(pattern) {
 }
 
 export function validateConfig(raw) {
-  const cfg = { ...CONFIG_DEFAULTS, ask_patterns: [], allow_overrides: [] };
+  const cfg = { ...CONFIG_DEFAULTS, ask_patterns: [], allow_overrides: [], danger_binaries: {} };
   const warnings = [];
   if (raw == null) return { cfg, warnings };
   if (typeof raw !== 'object' || Array.isArray(raw)) {
     return { cfg, warnings: ['config.json is not a JSON object — using defaults'] };
   }
-  for (const key of ['max_continuations', 'budget_floor_pct', 'spawn_floor_pct', 'thin_budget_pct', 'stale_assess_min', 'proposal_max_surfaced', 'stale_converged_days', 'keyoku_call_timeout_ms', 'slm_timeout_ms']) {
+  for (const key of ['max_continuations', 'budget_floor_pct', 'spawn_floor_pct', 'thin_budget_pct', 'stale_assess_min', 'thrash_threshold', 'proposal_max_surfaced', 'stale_converged_days', 'keyoku_call_timeout_ms', 'slm_timeout_ms']) {
     if (raw[key] === undefined) continue;
     // keyoku_call_timeout_ms needs a sane floor (refute L2-5): 0 passed the >=0 check and
     // made EVERY keyoku RPC time out instantly (setTimeout(...,0) fires before spawn+SDK
@@ -168,7 +170,7 @@ export function validateConfig(raw) {
     // while doctor showed a valid config. Below 1000ms falls back like any bad field.
     // slm_timeout_ms gets the same treatment at 100ms: an instant-abort timeout would
     // silently disable stage 2 forever while doctor showed a valid config.
-    const min = key === 'keyoku_call_timeout_ms' ? 1000 : key === 'slm_timeout_ms' ? 100 : 0;
+    const min = key === 'keyoku_call_timeout_ms' ? 1000 : key === 'slm_timeout_ms' ? 100 : key === 'thrash_threshold' ? 2 : 0;
     if (typeof raw[key] === 'number' && Number.isFinite(raw[key]) && raw[key] >= min) cfg[key] = raw[key];
     else warnings.push(`config: ${key} must be a ${min > 0 ? `number >= ${min}` : 'non-negative number'} — using default ${CONFIG_DEFAULTS[key]}`);
   }
@@ -216,6 +218,17 @@ export function validateConfig(raw) {
         else warnings.push(`config: allow_overrides entry ${JSON.stringify(p)} is not a valid regex string — skipped`);
       }
     } else warnings.push('config: allow_overrides must be an array of regex strings — ignored');
+  }
+  if (raw.danger_binaries !== undefined) {
+    if (raw.danger_binaries && typeof raw.danger_binaries === 'object' && !Array.isArray(raw.danger_binaries)) {
+      for (const [bin, subs] of Object.entries(raw.danger_binaries)) {
+        if (typeof bin === 'string' && bin && Array.isArray(subs)) {
+          const clean = subs.filter((s) => typeof s === 'string' && s);
+          if (clean.length) cfg.danger_binaries[bin.toLowerCase()] = clean;
+          else warnings.push(`config: danger_binaries['${bin}'] must be a non-empty array of subcommand strings (or ['*']) — skipped`);
+        } else warnings.push(`config: danger_binaries['${bin}'] must be an array of subcommand strings (or ['*']) — skipped`);
+      }
+    } else warnings.push('config: danger_binaries must be an object of {binary: [subcommands]} — ignored');
   }
   return { cfg, warnings };
 }

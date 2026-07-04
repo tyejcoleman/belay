@@ -355,3 +355,32 @@ test('bin: `belay propose` prints the scan JSON; `--dismiss` round-trips through
   const again = JSON.parse(run(h, ['propose']).stdout);
   assert.equal(again.proposals[0].status, 'dismissed');
 });
+
+// ── ADR-21: S6 orphaned-loop (a session-pinned armed loop whose arming session is gone) ──
+
+test('S6 orphaned-loop: an armed session-pinned loop whose arming session is gone surfaces', () => {
+  const h = homes();
+  writeKeyoku(h, { goals: [goal()], focus: focusFor({ sessionId: 'dead-sess' }), obsLines: [obs()] });
+  writeLoops(h, { goal_test1: { armed: true, paused: false, session_id: 'dead-sess', loop_scope: 'session' } });
+  mkdirSync(h.tokenroom, { recursive: true });
+  writeFileSync(join(h.tokenroom, 'sessions.json'), JSON.stringify({ 'other-live': { key: 'k', at: nowSec() } }));
+  const orphan = open(scanIn(h, nowSec())).find((p) => p.kind === 'orphaned-loop');
+  assert.ok(orphan, 'expected an orphaned-loop proposal');
+  assert.match(orphan.summary, /armed but pinned to session/);
+  assert.equal(orphan.evidence.focused, true);
+  assert.equal(orphan.suggested_action.tool, 'belay_loop_disarm');
+});
+
+test('S6 stays silent when the arming session is active, and when tokenroom is absent', () => {
+  const live = homes();
+  writeKeyoku(live, { goals: [goal()], focus: focusFor({ sessionId: 's-live' }), obsLines: [obs()] });
+  writeLoops(live, { goal_test1: { armed: true, paused: false, session_id: 's-live', loop_scope: 'session' } });
+  mkdirSync(live.tokenroom, { recursive: true });
+  writeFileSync(join(live.tokenroom, 'sessions.json'), JSON.stringify({ 's-live': { key: 'k', at: nowSec() } }));
+  assert.equal(open(scanIn(live, nowSec())).filter((p) => p.kind === 'orphaned-loop').length, 0);
+
+  const noTr = homes(); // no tokenroom → cannot prove a session dead → no false orphan
+  writeKeyoku(noTr, { goals: [goal()], focus: focusFor({ sessionId: 'dead' }), obsLines: [obs()] });
+  writeLoops(noTr, { goal_test1: { armed: true, paused: false, session_id: 'dead', loop_scope: 'session' } });
+  assert.equal(open(scanIn(noTr, nowSec())).filter((p) => p.kind === 'orphaned-loop').length, 0);
+});

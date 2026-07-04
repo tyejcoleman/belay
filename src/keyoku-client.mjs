@@ -125,12 +125,22 @@ export async function keyokuSession({ timeoutMs } = {}) {
       p.reject(new Error(msg));
     }
   };
+  // Resolve on the FIRST of 'exit' or 'close' (MCP-F6): 'close' fires only after every stdio
+  // stream ends, so a keyoku child that spawns a descendant inheriting its stdout pipe never
+  // emits 'close' even after SIGKILL — and close() would await exitPromise forever, wedging
+  // the MCP tool call. 'exit' fires when the child process itself exits regardless of the
+  // inherited pipe, so racing the two guarantees exitPromise always settles.
   const exitPromise = new Promise((res) => {
-    child.on('close', (code) => {
+    let settled = false;
+    const finish = (code) => {
+      if (settled) return;
+      settled = true;
       exited = true;
-      failAll(`keyoku child exited (code ${code}) before responding — ${STDERR_WITHHELD}`);
+      failAll(`keyoku child exited (code ${code ?? '?'}) before responding — ${STDERR_WITHHELD}`);
       res(code);
-    });
+    };
+    child.on('close', finish);
+    child.on('exit', finish);
   });
   child.on('error', (e) => {
     exited = true;

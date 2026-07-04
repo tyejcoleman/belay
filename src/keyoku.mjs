@@ -119,13 +119,32 @@ export const goalSlug = (goal, focus) => {
  * block reason, so both are sanitized here (ADR-7): ids to a tame charset, descriptions
  * to single-line control-char-free text capped at 120 chars.
  */
+// The join was `ids.map(id => criteria.find(...))` — O(unmet × criteria). A pathological or
+// hostile goal with tens of thousands of criteria AND unmet ids made this run for seconds
+// (measured 21s at 100k×100k), and since it runs in decideStop it could blow the Stop hook's
+// 10s timeout → the hook is KILLED → the stop fails OPEN, releasing a hold it should keep
+// (refute F2). Fixed two ways: index criteria by id once (O(1) lookup), and CAP the number of
+// unmet ids materialized (the joined reason is byte-capped downstream anyway, and belay_status
+// count-caps too, so nothing truthful is lost — a pathological set is truncated, not trusted).
+const UNMET_DETAIL_CAP = 500;
 export function unmetDetail(goal, obs) {
   if (!obs || !Array.isArray(obs.unmet)) return null;
-  const ids = obs.unmet.filter((x) => typeof x === 'string' && x);
   const criteria = Array.isArray(goal?.criteria) ? goal.criteria : [];
-  return ids.map((id) => {
+  const byId = new Map();
+  for (const c of criteria) {
+    if (c && typeof c === 'object' && typeof c.id === 'string' && !byId.has(c.id)) byId.set(c.id, c);
+  }
+  const out = [];
+  let seen = 0;
+  for (const id of obs.unmet) {
+    if (typeof id !== 'string' || !id) continue;
+    if (seen++ >= UNMET_DETAIL_CAP) {
+      out.push(`…(${obs.unmet.length - UNMET_DETAIL_CAP}+ more unmet criteria truncated)`);
+      break;
+    }
     const sid = sanitizeSlug(id, 40);
-    const c = criteria.find((c) => c && typeof c === 'object' && c.id === id);
-    return c && typeof c.description === 'string' && c.description ? `${sid}: ${sanitizeText(c.description, 120)}` : sid;
-  });
+    const c = byId.get(id);
+    out.push(c && typeof c.description === 'string' && c.description ? `${sid}: ${sanitizeText(c.description, 120)}` : sid);
+  }
+  return out;
 }

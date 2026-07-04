@@ -26,6 +26,10 @@ import { loopCreate, loopPause, loopResume, loopDisarm } from './loops.mjs';
 import { scan, dismiss } from './propose.mjs';
 
 export const PROTOCOL_VERSION = '2025-06-18';
+// Versions this server actually speaks (all newline-delimited JSON-RPC, same framing). We
+// negotiate DOWN to a supported one instead of echoing whatever the client sent (hook-F8):
+// echoing an unknown future version claims framing semantics we may not implement.
+export const SUPPORTED_PROTOCOLS = new Set(['2025-06-18', '2025-03-26', '2024-11-05']);
 export const SERVER_INFO = { name: 'belay', version: '0.3.0' }; // kept in lockstep with package.json (scaffold test asserts it)
 
 /** The 7-tool surface — schemas are the DESIGN.md §2.2 contract, verbatim. FROZEN. */
@@ -178,7 +182,7 @@ export async function mcpServe() {
         jsonrpc: '2.0',
         id,
         result: {
-          protocolVersion: params?.protocolVersion ?? PROTOCOL_VERSION,
+          protocolVersion: SUPPORTED_PROTOCOLS.has(params?.protocolVersion) ? params.protocolVersion : PROTOCOL_VERSION,
           capabilities: { tools: {} },
           serverInfo: SERVER_INFO,
         },

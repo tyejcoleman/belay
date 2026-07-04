@@ -95,8 +95,20 @@ export function doctor(argv = []) {
   const settings = readJSON(join(dir, 'settings.json'));
   for (const event of ['Stop', 'PreToolUse', 'SessionStart']) {
     const entries = Array.isArray(settings?.hooks?.[event]) ? settings.hooks[event] : [];
-    const present = entries.some((m) => (m?.hooks ?? []).some((h) => typeof h?.command === 'string' && h.command.includes(MARK)));
-    say(present ? 'ok' : 'warn', `${event} hook ${present ? 'registered' : 'NOT registered — run `belay install`'}`);
+    const ownedCmds = entries.flatMap((m) => m?.hooks ?? []).map((h) => h?.command).filter((c) => typeof c === 'string' && c.includes(MARK));
+    if (ownedCmds.length === 0) {
+      say('warn', `${event} hook NOT registered — run \`belay install\``);
+      continue;
+    }
+    // Dead-path check (MCP-F3): a registered hook whose quoted node/bin path no longer exists
+    // (moved package, upgraded node) fails SILENTLY forever — hooks are non-blocking — while a
+    // substring-only check still reports it "registered". So the rope AND the arrest are dead
+    // but doctor looked green. Validate every quoted path in the owned commands actually exists.
+    const dead = ownedCmds.some((c) =>
+      (c.match(/"([^"]+)"/g) || []).map((q) => q.slice(1, -1)).some((p) => /[/\\]/.test(p) && !existsSync(p))
+    );
+    if (dead) say('FAIL', `${event} hook registered but its command path no longer exists (moved package or upgraded node?) — re-run \`belay install\` to refresh it (the hook is silently dead until you do)`);
+    else say('ok', `${event} hook registered`);
   }
   // bypassPermissions as the DEFAULT mode makes every "ask" a silent allow (observed live
   // 2026-07-02: the gate asked, `git push --dry-run` ran anyway). ADR-13: the gate
@@ -140,13 +152,22 @@ export function doctor(argv = []) {
       const orphans = entries.filter(([gid]) => !goalRows.some((g) => g && typeof g === 'object' && g.id === gid)).map(([gid]) => sanitizeSlug(gid, 40));
       if (orphans.length) say('warn', `${orphans.length} loop ${orphans.length === 1 ? 'entry points' : 'entries point'} at goals missing from goals.json (${orphans.slice(0, 3).join(', ')}) — pruned on the next loop write`);
       else say('ok', 'every loop entry maps to a goals.json row');
+      // Armed-but-unfocused (MCP-F7): keyoku's focus is a singleton, so a second session's
+      // loop_create displaces the first — whose entry stays armed:true while its rope is inert
+      // (belay_status shows loop:null for the arming session). Surface these dead-armed loops.
+      const focusNow = readJSON(join(home, 'focus.json'));
+      const focusId = focusNow && typeof focusNow === 'object' && typeof focusNow.goalId === 'string' ? focusNow.goalId : null;
+      const displaced = entries
+        .filter(([gid, e]) => e && typeof e === 'object' && e.armed === true && e.paused !== true && gid !== focusId && goalRows.some((g) => g && g.id === gid))
+        .map(([gid]) => sanitizeSlug(gid, 40));
+      if (displaced.length) say('warn', `${displaced.length} armed loop${displaced.length === 1 ? '' : 's'} not the focused goal (focus is a singleton) — the rope is inert for ${displaced.length === 1 ? 'it' : 'them'}: ${displaced.slice(0, 3).join(', ')}. Resume in the arming session or \`belay loop disarm\``);
     }
   }
   const propsRaw = existsSync(join(belayDir(), 'proposals.json')) ? readJSON(join(belayDir(), 'proposals.json')) : undefined;
   if (propsRaw === undefined) say('ok', 'no proposals.json — nothing proposed yet (the scan runs at SessionStart / `belay propose`)');
   else if (!propsRaw || !Array.isArray(propsRaw.proposals)) say('warn', 'proposals.json malformed — treated as none; the next scan re-derives it');
   else {
-    const KINDS = ['resume-ready', 'unfocused-autonomous', 'stale-converged', 'budget-reset', 'keyoku-ripe'];
+    const KINDS = ['resume-ready', 'unfocused-autonomous', 'stale-converged', 'budget-reset', 'keyoku-ripe', 'orphaned-loop'];
     const STATUSES = ['open', 'dismissed', 'armed'];
     const bad = propsRaw.proposals.filter((p) => !(p && typeof p === 'object' && typeof p.id === 'string' && p.id && KINDS.includes(p.kind) && STATUSES.includes(p.status)));
     if (bad.length) say('warn', `proposals.json: ${bad.length}/${propsRaw.proposals.length} rows missing id/kind/status (or carrying unknown values) — shape contract broken?`);

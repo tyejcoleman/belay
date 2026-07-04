@@ -1,5 +1,6 @@
 import { appendFileSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { readStdin, readConfig, fmtClock, toEpochSec, sanitizeSlug, capReason, belayDir, ensureDir } from './util.mjs';
 import { readKeyoku, goalSlug, unmetDetail } from './keyoku.mjs';
 import { readBudget } from './budget.mjs';
@@ -157,16 +158,41 @@ export function decideStop(_p, k, budget, cfg, entry, nowSec = Date.now() / 1000
   // The unmet items are already per-item sanitized (keyoku.unmetDetail); cap the joined
   // list and the whole reason so a goal with a huge criteria set can't flood context (ADR-7).
   const unmetStr = capReason(unmet.join('; '), 1200);
+
+  // Thrash detection (ADR-21): hash the unmet SET (ids, order-independent) and count how many
+  // consecutive blocks have carried it. When the same set survives thrash_threshold blocks the
+  // current approach is not moving the criteria — a mid-tier model's signature failure is to
+  // retry the same failing action, and today every block reads identically. This changes only
+  // the guidance TEXT; the block still increments the continuation counter and is still capped,
+  // so the ADR-6 termination bound is untouched (kind stays a blocking kind, hard-capped).
+  const unmetIds = Array.isArray(k.obs?.unmet) ? k.obs.unmet.filter((x) => typeof x === 'string') : [];
+  const unmetHash = createHash('sha256').update(unmetIds.slice().sort().join(' ')).digest('hex').slice(0, 16);
+  const sameUnmetCount = entry.lastUnmetHash === unmetHash ? (entry.sameUnmetCount ?? 0) + 1 : 1;
+  const nextContinuations = entry.continuations + 1;
+  const lastHeld = nextContinuations >= cfg.max_continuations; // this is the final held block before release
+  const thrashing = sameUnmetCount >= cfg.thrash_threshold;
+
+  let guidance;
+  if (lastHeld) {
+    // The hold is about to release for good. Direct a clean landing — otherwise the model is
+    // released silently (the exhaustion note goes to stderr, which it never sees) and writes a
+    // confident summary of an unconverged task.
+    guidance = `This is your LAST held continuation (${nextContinuations}/${cfg.max_continuations}) and the goal is NOT converged. Before you stop: run goal_assess for the true state, goal_record the specific blockers, checkpoint via tokenroom handoff/plan_resume, and write a short summary a human can act on — do NOT claim success. After this the hold releases.`;
+  } else if (thrashing) {
+    guidance = `These SAME criteria have not moved across ${sameUnmetCount} assessments — your current approach is not working. STOP repeating it: run the failing probe yourself, read its ACTUAL output, goal_record the diagnosis, then CHANGE strategy. If the next assessment still shows no change, mark the goal blocked or abandoned in keyoku (goal_update) with the reason — belay releases the hold on any non-active goal.`;
+  } else {
+    // Prioritization nudge: a model scattering across many unmet criteria makes no measurable
+    // progress. Preserves the "run goal_assess to verify (never claim convergence without it)"
+    // anchor the rest of the system checks for.
+    guidance = `Pick ONE unmet criterion — the cheapest to verify — and drive only it this turn; when you believe it now passes, run goal_assess to verify (never claim convergence without it).`;
+  }
+
   return {
     action: 'block',
-    kind: 'block',
+    kind: thrashing && !lastHeld ? 'block-thrash' : 'block',
     save: true,
-    entry: { ...entry, continuations: entry.continuations + 1 },
-    reason: capReason(
-      `[belay] goal '${slug}' not converged — unmet: ${unmetStr}. ` +
-        `Continue working toward these criteria; when you believe one now passes, run goal_assess to verify (never claim convergence without it).` +
-        budgetLine(budget, cfg)
-    ),
+    entry: { ...entry, continuations: nextContinuations, lastUnmetHash: unmetHash, sameUnmetCount },
+    reason: capReason(`[belay] goal '${slug}' not converged — unmet: ${unmetStr}. ${guidance}${budgetLine(budget, cfg)}`),
   };
 }
 

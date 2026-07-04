@@ -1,12 +1,12 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { readJSON, readConfig, toEpochSec, sanitizeText, sanitizeSlug, belayDir, tokenroomDir } from './util.mjs';
+import { readJSON, readConfig, toEpochSec, sanitizeText, sanitizeSlug, capReason, belayDir, tokenroomDir } from './util.mjs';
 import { keyokuHome, readKeyoku, goalSlug, unmetDetail } from './keyoku.mjs';
 import { readBudget } from './budget.mjs';
 import { readOwnState, sessionEntry } from './state.mjs';
 import { readLoops } from './loops.mjs';
 import { pendingSummary } from './pending.mjs';
-import { decideStop } from './stop.mjs';
+import { decideStop, budgetLine } from './stop.mjs';
 import { keyokuStatus, tokenroomInstalled, belayHooksStatus, claudeJsonPath } from './stack.mjs';
 import { configDir, MARK } from './install.mjs';
 
@@ -26,6 +26,18 @@ import { configDir, MARK } from './install.mjs';
 // binary; ~/.tokenroom or an installed hook still counts (the states that carry data).
 
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
+// Array-count caps for the MCP surface (MCP-F4): the Stop hook already caps the JOINED unmet
+// text (capReason 1.2KB), but buildStatus returned the same file-controlled arrays uncapped —
+// a torn/hostile observations tail with 100k unmet ids, or a goal row with thousands of
+// constraints, floods megabytes of JSON into the model's context. Cap the COUNT here too.
+const MAX_LIST = 50;
+const MAX_ROWS = 200;
+/** Cap an array's length, appending a truncation marker; passes null/non-arrays through. */
+function capList(arr, max = MAX_LIST) {
+  if (!Array.isArray(arr) || arr.length <= max) return arr;
+  return [...arr.slice(0, max), `…(${arr.length - max} more truncated)`];
+}
 
 // ── Budget attribution (tokenroom ADR-24 mirror — DESIGN.md §2.2 T1) ─────────────────
 // MCP calls carry no session id. The sessions.json map tells us which ACCOUNTS were
@@ -175,8 +187,8 @@ export function buildStatus({ session_id, cwd } = {}) {
       usedIterations: num(g.usedIterations),
       maxIterations: num(g.maxIterations),
       lastAssessedAt: typeof g.lastAssessedAt === 'string' ? g.lastAssessedAt : null,
-      constraints: Array.isArray(g.constraints) ? g.constraints.filter((c) => typeof c === 'string' && c).map((c) => sanitizeText(c, 200)) : [],
-      unmet: unmetDetail(g, k.obs), // per-item sanitized in keyoku.mjs; null = no readable assessment
+      constraints: capList(Array.isArray(g.constraints) ? g.constraints.filter((c) => typeof c === 'string' && c).map((c) => sanitizeText(c, 200)) : []),
+      unmet: capList(unmetDetail(g, k.obs)), // per-item sanitized in keyoku.mjs; null = no readable assessment; count-capped (MCP-F4)
       assessment_age_min: freshAt == null ? null : Math.max(0, Math.round((nowSec - freshAt) / 60)),
     };
   }
@@ -228,6 +240,43 @@ export function buildStatus({ session_id, cwd } = {}) {
     proposals_open,
     pending: pendingSummary(),
   };
+}
+
+/**
+ * Compaction re-briefing (ADR-21): a one-block summary of the loop a session is mid-flight on,
+ * for SessionStart to re-inject after a compaction/resume/startup. SessionStart previously
+ * surfaced ONLY proposals, and a mid-flight loop is by definition not a proposal — so a
+ * compacted session restarted BLIND, rediscovering its goal only when it next tried to stop.
+ * All data is a pure file read (readKeyoku + state + budget), reusing the Stop hook's own
+ * freshness and budget wording. Returns a sanitized/capped string, or null when there is no
+ * scope-matched focused active autonomous loop to brief (incl. a paused one — not being driven).
+ *
+ * @param {{ session_id?: string, cwd?: string }} [opts]
+ * @returns {string|null}
+ */
+export function buildLoopBriefing({ session_id, cwd } = {}) {
+  const { cfg } = readConfig();
+  const k = readKeyoku({ sessionId: session_id, cwd });
+  if (!k.present || k.paused || !k.focus || !k.matched || !k.goal) return null;
+  const g = k.goal;
+  if (g.status !== 'active' || g.autonomy !== 'autonomous') return null;
+  const le = readLoops().loops[g.id];
+  if (le && typeof le === 'object' && le.paused === true) return null; // paused = rope released, nothing to resume-brief
+
+  const slug = sanitizeSlug(goalSlug(g, k.focus));
+  const parts = [`[belay] you are MID-LOOP on autonomous goal '${slug}' (a live convergence loop — likely from before a context compaction)`];
+  if (typeof g.objective === 'string' && g.objective) parts.push(`objective: ${sanitizeText(g.objective, 200)}`);
+  const unmet = unmetDetail(g, k.obs);
+  if (Array.isArray(unmet) && unmet.length) parts.push(`unmet: ${capReason(unmet.join('; '), 600)}`);
+  else if (unmet == null) parts.push('no readable assessment yet');
+  const cons = Array.isArray(g.constraints) ? g.constraints.filter((c) => typeof c === 'string' && c).slice(0, 5).map((c) => sanitizeText(c, 120)) : [];
+  if (cons.length) parts.push(`constraints: ${cons.join('; ')}`);
+  const entry = sessionEntry(readOwnState(), session_id ?? 'status-probe', g.id);
+  parts.push(`continuations ${entry.continuations}/${cfg.max_continuations}`);
+  const bl = budgetLine(readBudget(session_id, Date.now() / 1000), cfg).trim();
+  if (bl) parts.push(bl.replace(/\.$/, ''));
+  parts.push('run goal_assess to re-establish ground truth before continuing (never claim convergence without it)');
+  return capReason(parts.join(' · '), 1200);
 }
 
 /**
@@ -294,5 +343,7 @@ export function buildLoopList() {
 
   const rank = (r) => (r.focused ? 0 : r.armed ? 1 : r.status === 'active' ? 2 : 3);
   out.sort((a, b) => rank(a) - rank(b) || a.slug.localeCompare(b.slug));
+  // Bound the row count (MCP-F4): a keyoku with thousands of goals must not flood context.
+  if (out.length > MAX_ROWS) return { loops: out.slice(0, MAX_ROWS), truncated: out.length - MAX_ROWS };
   return { loops: out };
 }

@@ -10,6 +10,45 @@
 
 ## Unreleased
 
+### Hardening + intelligence pass — audit gaps closed (ADR-18..21)
+
+Driven by a 4-reviewer adversarial audit (hook-path, MCP/loops, effectiveness, test quality).
+
+- **Fall-arrest is now wrapper-proof (ADR-18).** The command classifier scans the whole string
+  for the dangerous binary instead of walking the leading token of each `&&`/`;` segment, so
+  `sh -c 'git push'`, `bash -lc`, `eval`, backticks, `$(…)`, `(subshell)`, a lone `&`, and
+  `env FOO=bar git push` no longer silently allow an irreversible action. Also now caught:
+  `gh api` non-GET/field writes, `npm publish` behind value-taking globals, `curl/wget`
+  DELETE/PATCH and bundled/attached flags (`-sX POST`, `-da=1`, `-Tfile`), `find -exec rm -rf`,
+  and case variants (`GIT`/`RM`). New config `danger_binaries` (`{binary:[subs]|['*']}`) extends
+  the built-in table (docker/kubectl/terraform/… defaults) for any stack, no code change. New
+  property/fuzz suite `test/gate-fuzz.test.mjs` covers the wrapper × binary × flag space.
+- **No self-liberation, no verifier tampering (ADR-19).** New HARD `loop control` gate class
+  routes `belay_loop_disarm` + keyoku `goal_unfocus`/`goal_update`/`goal_converge`/`goal_delete`
+  to the human while a loop is focused; the ADR-13 bypass deny no longer advertises
+  disarm-then-retry (which laundered the arrest).
+- **Install/uninstall can no longer destroy settings.json (ADR-20).** Refuse to overwrite a
+  present-but-unparseable settings.json; uninstall backs up first; both write atomically;
+  re-install refreshes a stale hook path; doctor FAILs a registered hook whose path is gone.
+- **The intelligence layer (ADR-21).** Thrash detection (differential "change strategy" guidance
+  when the same criteria won't move), final-continuation wrap-up (clean landing instead of a
+  silent release), prioritization ("pick ONE"), SessionStart compaction re-briefing of a live
+  loop, and an orphaned-loop proposal (S6) — all within the never-crash hooks, none touching the
+  ADR-6 termination proof. New config `thrash_threshold` (default 3).
+- **MCP surface hardening:** `belay_status`/`belay_loop_list` cap file-controlled array counts
+  (context-flood defense); `keyoku-client` races `exit`/`close` so a lingering grandchild can't
+  wedge a tool call; `loop_create` failures carry may-have-landed guidance; MCP `initialize`
+  negotiates a supported protocol version.
+- **Adversarial refute hardening (post-audit):** an independent pass found and this closed —
+  self-liberation via `mcp__keyoku__goal_focus` (re-focus off the arrest goal) and via one-line
+  control-file writes (`touch ~/.keyoku/paused`, `> …/focus.json`, `> ~/.belay/config.json`), now
+  both gated (goal_focus in `loop control`; a new HARD `control-file tampering` class); a
+  fail-OPEN where `unmetDetail`'s O(unmet×criteria) join could time out the Stop hook on a
+  pathological goal (now O(n) via a Map + a 500-id cap, 21.6s→12ms); a silent hook-drop when
+  `settings.json` had a non-object `hooks` (now refused); and shell line-continuation
+  (`git \⏎push`) slipping the classifier (now normalized). New regression tests for each.
+- Version intentionally NOT bumped here; folds into the next release.
+
 ### Stage-2 learned-adjudicator hook — refine-only, fail-safe-first (ADR-17)
 
 - **New config keys** `slm_enabled` (default **false**), `slm_url` (default

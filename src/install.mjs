@@ -1,8 +1,9 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, renameSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 
 // Installer discipline mirrors tokenroom's: a MARK string identifies the entries we own,
 // install is ADDITIVE (every pre-existing hook — tokenroom's included — is preserved),
@@ -32,6 +33,33 @@ const readSettings = (p) => {
     return {};
   }
 };
+
+/**
+ * Load settings.json for a WRITE, distinguishing absent from corrupt (ADR-20). Overwriting a
+ * present-but-unparseable settings.json with a belay-only object destroys the user's entire
+ * config (permissions, model, other hooks) with no recovery — install had a `.belay-bak`,
+ * uninstall had nothing. So a parse failure on an EXISTING file returns { unparseable: true }
+ * and the caller REFUSES to write. Absent file → a clean {} is fine.
+ * @returns {{ settings: object|null, unparseable: boolean }}
+ */
+function loadSettingsForWrite(p) {
+  if (!existsSync(p)) return { settings: {}, unparseable: false };
+  try {
+    const o = JSON.parse(readFileSync(p, 'utf8'));
+    if (o && typeof o === 'object' && !Array.isArray(o)) return { settings: o, unparseable: false };
+    return { settings: null, unparseable: true }; // valid JSON but a scalar/array — refuse to clobber
+  } catch {
+    return { settings: null, unparseable: true };
+  }
+}
+
+/** Atomic tmp+rename write so a crash mid-write never leaves a torn settings.json for the
+ *  concurrent Claude Code sessions reading it (MCP-F2). */
+function writeSettingsAtomic(p, settings) {
+  const tmp = `${p}.${randomBytes(4).toString('hex')}.belay-tmp`;
+  writeFileSync(tmp, JSON.stringify(settings, null, 2) + '\n');
+  renameSync(tmp, p);
+}
 
 const owned = (command) => typeof command === 'string' && command.includes(MARK);
 
@@ -100,7 +128,25 @@ export function install(argv = []) {
   const changes = [];
 
   mkdirSync(dir, { recursive: true });
-  const settings = readSettings(settingsPath);
+  const { settings, unparseable } = loadSettingsForWrite(settingsPath);
+  if (unparseable) {
+    console.error(
+      `belay install: ${settingsPath} exists but is not a valid JSON object — refusing to overwrite it.\n` +
+        'Overwriting would destroy your permissions/model/other hooks. Fix or move it, then re-run.'
+    );
+    process.exitCode = 1;
+    return;
+  }
+  // A non-plain-object `hooks` (array or scalar) would silently drop belay's hooks: named
+  // properties set on an array don't survive JSON.stringify, and a string throws (refute
+  // F3/F7). Refuse rather than report "installed" for hooks that won't persist.
+  if (settings.hooks !== undefined && (typeof settings.hooks !== 'object' || Array.isArray(settings.hooks) || settings.hooks === null)) {
+    console.error(
+      `belay install: ${settingsPath} has a "hooks" field that is ${Array.isArray(settings.hooks) ? 'an array' : `a ${settings.hooks === null ? 'null' : typeof settings.hooks}`}, not an object — refusing to modify it (belay's hooks would be silently dropped and the fall-arrest would be absent). Fix "hooks" to an object, then re-run.`
+    );
+    process.exitCode = 1;
+    return;
+  }
   if (!dry && existsSync(settingsPath)) copyFileSync(settingsPath, settingsPath + '.belay-bak');
 
   settings.hooks ??= {};
@@ -110,15 +156,35 @@ export function install(argv = []) {
       changes.push(`hook ${event}: existing entry is not an array — left untouched, NOT installed (fix settings.json by hand)`);
       continue;
     }
-    if (settings.hooks[event].some((m) => (m?.hooks ?? []).some((h) => owned(h?.command)))) {
-      changes.push(`hook ${event}: already installed`);
-    } else {
-      settings.hooks[event].push({ hooks: [{ type: 'command', command: cmd(sub), timeout: 10 }] });
+    // Re-install REFRESHES, not just skips (MCP-F3): if an owned command exists but points at
+    // a stale node/bin path (moved package, upgraded node), rewrite it to this install's path
+    // so the hook can't silently fail forever while doctor reports it "registered".
+    const want = cmd(sub);
+    let found = false;
+    let refreshed = false;
+    for (const m of settings.hooks[event]) {
+      for (const h of m?.hooks ?? []) {
+        if (!owned(h?.command)) continue;
+        found = true;
+        if (h.command !== want) {
+          h.command = want;
+          refreshed = true;
+        }
+        if (h.type !== 'command') h.type = 'command';
+        if (typeof h.timeout !== 'number') h.timeout = 10;
+      }
+    }
+    if (!found) {
+      settings.hooks[event].push({ hooks: [{ type: 'command', command: want, timeout: 10 }] });
       changes.push(`hook ${event}: installed (${label})`);
+    } else if (refreshed) {
+      changes.push(`hook ${event}: refreshed (command path updated to this install)`);
+    } else {
+      changes.push(`hook ${event}: already installed (up to date)`);
     }
   }
 
-  if (!dry) writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
+  if (!dry) writeSettingsAtomic(settingsPath, settings);
 
   changes.push(registerMcp(argv, dry));
 
@@ -136,8 +202,19 @@ export function uninstall(argv = []) {
   const changes = [];
 
   if (existsSync(settingsPath)) {
-    const settings = readSettings(settingsPath);
-    if (settings.hooks && typeof settings.hooks === 'object') {
+    const { settings, unparseable } = loadSettingsForWrite(settingsPath);
+    if (unparseable) {
+      // Never rewrite an unparseable file as `{}` (MCP-F2): that silently deleted the user's
+      // entire config with no backup. Refuse; the belay lines can be removed by hand.
+      console.error(
+        `belay uninstall: ${settingsPath} is not a valid JSON object — refusing to overwrite it (that would destroy your config).\n` +
+          'Remove belay\'s hook lines (commands containing "belay.mjs") by hand.'
+      );
+      process.exitCode = 1;
+      return;
+    }
+    copyFileSync(settingsPath, settingsPath + '.belay-bak'); // back up before touching it (uninstall had none)
+    if (settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)) {
       for (const event of Object.keys(settings.hooks)) {
         if (!Array.isArray(settings.hooks[event])) continue;
         const before = settings.hooks[event].length;
@@ -147,7 +224,7 @@ export function uninstall(argv = []) {
       }
       if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
     }
-    writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
+    writeSettingsAtomic(settingsPath, settings);
   }
 
   changes.push(unregisterMcp(argv));

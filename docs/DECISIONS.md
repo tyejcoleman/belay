@@ -436,6 +436,116 @@ on stage 1, the ADR-4 posture). The fail-safe is provable and tested: with the d
 **stopped** and `slm_enabled: true`, gate output is byte-identical to 0.3.0 for every
 class (`test/gate-slm.test.mjs`, the plan's convergence criterion c7).
 
+## ADR-18 — wrapper-aware, config-extensible command classification *(2026-07-03)*
+
+**Decision:** The gate classifies dangerous Bash by SCANNING the whole command string for the
+binary regardless of shell wrapper, quoting, or chaining — not by walking the leading token of
+each `&&`/`;` segment. `classifyVcs` (git/npm/gh) and `classifyDanger` (a data-driven table)
+both anchor on a command boundary (`[\s;|&`'"(=]`), so `sh -c 'git push'`, `bash -lc`, `eval`,
+backticks, `$(…)`, `(subshell)`, a lone `&`, `env FOO=bar git push`, and case variants
+(`GIT`/`RM` on a case-insensitive FS) all still classify. `gh api` non-GET/field writes,
+`npm publish` behind value-taking globals (`--registry <url> publish`), `curl/wget` DELETE/PATCH
+and bundled/attached flags (`-sX POST`, `-da=1`, `-Tfile`), and `find … -exec rm -rf {} +` are
+all caught. Coverage of the long tail (docker/kubectl/terraform/aws/…) is a DATA table:
+`DEFAULT_DANGER_BINARIES` in code, UNIONED with the user's `config.json` `danger_binaries`
+(`{binary:[subs]|['*']}`) — extending it to a new stack is one config line, never a code change.
+The classifier deliberately OVER-asks (ADR-3: a false ask is safe; a false allow is a
+fall-arrest failure); user `ask_patterns` run before the built-in table so a user can relabel a
+generic hit with their own class + note.
+
+**Why:** The pre-2026-07-03 `classifyVcs` inspected only the leading binary of each segment, so
+`sh -c 'git push'` — the single most common way an autonomous agent runs a command — silently
+allowed an irreversible push under an autonomous goal, in both `ask` and `defer` mode, untested.
+A denylist can never be complete (irreversibility is not syntactically decidable), so the design
+answer is not "enumerate everything in code" but "make the deterministic hook layer fast + dumb +
+wrapper-proof, and make its coverage data-driven so the user closes their own gaps." A
+property/fuzz test (`test/gate-fuzz.test.mjs`) now exercises the wrapper × binary × flag space
+the hand-picked example suite never covered — it found two real bugs during this build (an `env`
+prefix swallowing the real binary; a case-sensitive subcommand miss), both fixed.
+
+## ADR-19 — the arrest and the verifier are self-protecting (loop-control class) *(2026-07-03)*
+
+**Decision:** A HARD gate class `loop control` routes the tools that can REMOVE the arrest or
+WEAKEN the criteria holding the session to the human: `belay_loop_disarm`, and keyoku
+`goal_focus` / `goal_unfocus` / `goal_update` / `goal_converge` / `goal_delete`
+(`LOOP_CONTROL_ASK`). A second HARD class `control-file tampering` gates any write-ish Bash
+command targeting belay's or keyoku's OWN control files (`~/.belay`, `~/.keyoku`) —
+`touch ~/.keyoku/paused` (no-ops the whole harness), `> ~/.keyoku/focus.json` (clears the
+arrest), `echo '{"gate_enabled":false}' > ~/.belay/config.json` (disables the gate). Both fire
+only while a focused autonomous goal already exists, so normal use is untouched; pure reads of
+those files are not gated. The ADR-13 bypass-deny text no longer advertises "disarm the loop,
+then retry" — that path laundered the arrest (disarm is itself gated, and standing the loop down
+does not make the irreversible action approved). Under bypass the honest guidance is: run it from
+a non-bypass session.
+
+*(2026-07-03 refute hardening: the first cut gated only `goal_unfocus`/update/converge/delete
+and `belay_loop_disarm`; an adversarial pass found `goal_focus`→another-goal and one-line control-
+file writes as equivalent self-liberation, both now closed. Accepted residual limits: a `goal_focus`
+to a NEW autonomous goal the model also created is gated, but the deeper truth is that any denylist
+of tool names / control-file writes is best-effort — the real backstop remains that autonomy is
+per-goal + opt-in, and irreversibles route to the human. Filesystem tampering via an interpreter
+that constructs the path dynamically (`python -c`, `eval $var`) is undecidable by a static gate and
+out of scope; `python3?`/`node`/`perl` targeting a literal `.keyoku`/`.belay` path IS gated.)*
+
+**Why:** Two audited holes. (1) Self-liberation: under `bypassPermissions`, the ADR-13 deny told
+the model to call `belay_loop_disarm` — which was ungated — clearing the focus and turning the
+gate into a no-op, so the retried `git push` executed with no human ever contacted, two tool
+calls later, following the deny's own instructions. (2) Verifier tampering: a held model could
+call `goal_update`/`goal_converge` to weaken or fake-pass the very criteria holding it (edit the
+test, not the code) with no gate. Both are the same failure — the loop machinery must not be able
+to disable its own arrest or verifier — so both are closed by one class, HARD (never
+SLM-unlockable). Editing keyoku's files directly via Bash is still gated by the file-write
+classes; `belay_loop_pause` is intentionally NOT gated (it releases the rope, never the arrest).
+
+## ADR-20 — install/uninstall are non-destructive and self-healing *(2026-07-03)*
+
+**Decision:** `install`/`uninstall` distinguish an ABSENT settings.json (fresh `{}` is fine) from
+a PRESENT-but-unparseable one, and REFUSE to write over the latter (exit 1) — the old code parsed
+any failure as `{}` and wrote that back, silently destroying the user's permissions/model/other
+hooks (uninstall had no backup at all). Uninstall now backs up first like install; both write via
+atomic tmp+rename. Re-install REFRESHES a stale owned hook command (rewrites the node/bin path)
+instead of reporting "already installed", and `belay doctor` FAILs a registered hook whose quoted
+command path no longer exists (moved package / upgraded node) instead of greping the MARK
+substring and calling it "registered".
+
+**Why:** A single stray comma in settings.json turned `belay uninstall` into "delete my entire
+Claude Code config, no backup." And a moved package left both the rope and the arrest silently
+dead (hooks are non-blocking) while doctor reported everything green — the worst failure mode for
+a safety tool is looking healthy while being inert. Install sits on the harness's critical path;
+its failure budget for destroying user state is zero (ADR-4 spirit, extended to the installer).
+
+## ADR-21 — thrash-aware + compaction-surviving stop guidance (the intelligence layer) *(2026-07-03)*
+
+**Decision:** Belay's model-facing text now compensates for a mid-tier model's long-horizon
+weaknesses, all within the never-crash hook paths and WITHOUT touching the ADR-6 termination
+proof: (a) **thrash detection** — the session entry carries `lastUnmetHash` + `sameUnmetCount`;
+when the same unmet SET survives `thrash_threshold` (default 3) blocks, the reason switches from
+"keep going" to "your approach isn't moving these — run the probe yourself, record the diagnosis,
+CHANGE strategy; two more no-delta ⇒ mark it blocked". (b) **final-continuation wrap-up** — the
+LAST held block directs a clean landing (goal_assess, goal_record the blockers, checkpoint,
+human summary, do NOT claim success) instead of a silent stderr release the model never sees.
+(c) **prioritization** — the normal block says "pick ONE criterion, cheapest to verify". (d)
+**compaction re-briefing** — SessionStart re-injects a live loop's objective/unmet/constraints/
+counters/budget (`buildLoopBriefing`) so a compacted session doesn't resume blind; previously it
+surfaced only proposals, and a mid-flight loop is not a proposal. (e) **orphaned-loop proposal
+(S6)** — an armed, session-pinned loop whose arming session is gone from tokenroom's sessions.json
+surfaces "resume here or disarm."
+
+**Why:** The audit's effectiveness review found belay was an excellent SAFETY harness but a thin
+COGNITIVE one: the block text was byte-identical on continuation 2 and 19 (a thrashing model
+sailed through), a compacted session restarted with zero goal context, and an exhausted-but-
+unconverged model was released silently and wrote a confident summary of a failed task. These are
+exactly the mid-tier failure modes the harness exists to paper over so an Opus-class model
+performs at Fable level on long-horizon autonomous work. Every change is TEXT + tiny counter
+state: the block still increments the continuation counter and is still hard-capped, so the loop
+is still provably terminating (thrash/final-continuation only change wording, never the count).
+
+*(2026-07-03 refute hardening: `unmetDetail` — shared by decideStop, buildStatus, and the new
+briefing — was O(unmet × criteria) (`criteria.find` per id); a pathological/hostile goal with tens
+of thousands of criteria could run it for ~21s, blowing the Stop hook's 10s timeout so the hook is
+KILLED and the stop fails OPEN — the exact failure ADR-4/ADR-6 forbid. Fixed by indexing criteria
+in a Map (O(1) lookup) and capping materialized ids at 500; measured 21.6s → 12ms at 100k×100k.)*
+
 ## Non-ADR notes
 
 - **Compliance line (from the mission):** official surfaces only — Stop and PreToolUse

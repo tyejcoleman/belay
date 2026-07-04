@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import { belayDir, readJSON, readConfig, readStdin, ensureDir, atomicWriteJSON, sanitizeText, capReason } from './util.mjs';
 import { scan } from './propose.mjs';
+import { buildLoopBriefing } from './compose.mjs';
 
 // The SessionStart hook — the morning briefing (docs/DESIGN.md §4.2). Official surface:
 // hookSpecificOutput.additionalContext (same channel tokenroom uses). Wired by
@@ -33,41 +34,56 @@ export async function hookSessionStart() {
   // BOUNDED: a caller that never closes stdin must not wedge the hook (ADR-4; the
   // harness's own hook timeout is the outer net, this is the inner one). The payload
   // arrives-and-closes within ms in the real harness, so the race is normally a no-op.
+  let payload = {};
   try {
-    await Promise.race([readStdin(), new Promise((resolve) => setTimeout(resolve, 250).unref?.())]);
+    payload = (await Promise.race([readStdin(), new Promise((resolve) => setTimeout(() => resolve({}), 250).unref?.())])) || {};
     process.stdin.unref?.(); // a still-pending read must not hold the process open
   } catch {
     // stdin quirks are not our problem — proceed without the payload
   }
   try {
     const { cfg } = readConfig();
-    if (!cfg.proposals_enabled) return;
-    const open = scan().proposals.filter((p) => p && typeof p === 'object' && p.status === 'open');
-    const top = open.slice(0, cfg.proposal_max_surfaced);
-    if (top.length === 0) return; // silence is the posture (ADR-4)
 
-    const items = top.map((p, i) => sanitizeText(`(${i + 1}) ${p.kind} [${p.id}]: ${p.summary}`, MAX_LINE));
-    const context = capReason(
-      `[belay] ${open.length} loop proposal${open.length === 1 ? '' : 's'} open: ${items.join(' ')} — arm one with belay_loop_create({ proposal_id: <id>, … }) or dismiss via belay_propose({ dismiss: <id> }). Proposals are advisory; arming is your explicit call.`,
-      MAX_CONTEXT_BYTES
-    );
-
-    // surfaced_count bookkeeping (belay-local, best-effort — never blocks the surfacing)
+    // (1) Compaction re-briefing (ADR-21): if THIS session is mid-flight on a live loop, lead
+    // with the loop's objective/unmet/counters/budget so a compacted restart isn't blind. Pure
+    // file read, independent of proposals_enabled (it is not a proposal — it is the active loop).
+    let briefing = null;
     try {
-      const path = join(belayDir(), 'proposals.json');
-      const s = readJSON(path);
-      if (s && typeof s === 'object' && Array.isArray(s.proposals)) {
-        const ids = new Set(top.map((p) => p.id));
-        for (const p of s.proposals) {
-          if (p && typeof p === 'object' && ids.has(p.id)) p.surfaced_count = (typeof p.surfaced_count === 'number' && Number.isFinite(p.surfaced_count) ? p.surfaced_count : 0) + 1;
-        }
-        ensureDir(belayDir());
-        atomicWriteJSON(path, s);
-      }
+      briefing = buildLoopBriefing({ session_id: typeof payload.session_id === 'string' ? payload.session_id : undefined, cwd: typeof payload.cwd === 'string' ? payload.cwd : undefined });
     } catch {
-      // bookkeeping only
+      // briefing is best-effort — never block the hook
     }
 
+    // (2) Proposals — the morning briefing of loop-worthy work elsewhere (advisory, never armed).
+    let proposalsLine = null;
+    if (cfg.proposals_enabled) {
+      const open = scan().proposals.filter((p) => p && typeof p === 'object' && p.status === 'open');
+      const top = open.slice(0, cfg.proposal_max_surfaced);
+      if (top.length > 0) {
+        const items = top.map((p, i) => sanitizeText(`(${i + 1}) ${p.kind} [${p.id}]: ${p.summary}`, MAX_LINE));
+        proposalsLine = `[belay] ${open.length} loop proposal${open.length === 1 ? '' : 's'} open: ${items.join(' ')} — arm one with belay_loop_create({ proposal_id: <id>, … }) or dismiss via belay_propose({ dismiss: <id> }). Proposals are advisory; arming is your explicit call.`;
+
+        // surfaced_count bookkeeping (belay-local, best-effort — never blocks the surfacing)
+        try {
+          const path = join(belayDir(), 'proposals.json');
+          const s = readJSON(path);
+          if (s && typeof s === 'object' && Array.isArray(s.proposals)) {
+            const ids = new Set(top.map((p) => p.id));
+            for (const p of s.proposals) {
+              if (p && typeof p === 'object' && ids.has(p.id)) p.surfaced_count = (typeof p.surfaced_count === 'number' && Number.isFinite(p.surfaced_count) ? p.surfaced_count : 0) + 1;
+            }
+            ensureDir(belayDir());
+            atomicWriteJSON(path, s);
+          }
+        } catch {
+          // bookkeeping only
+        }
+      }
+    }
+
+    const blocks = [briefing, proposalsLine].filter(Boolean);
+    if (blocks.length === 0) return; // silence is the posture (ADR-4)
+    const context = capReason(blocks.join('\n\n'), MAX_CONTEXT_BYTES);
     process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: context } }));
   } catch {
     // ANY error = silent exit 0: a hook must never break the harness (ADR-4)

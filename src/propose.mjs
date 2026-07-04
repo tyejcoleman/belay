@@ -11,7 +11,7 @@ import { readLoops } from './loops.mjs';
 //
 // ~/.belay/proposals.json (§3.1):
 //   { "proposals": [ { "id": "<sha256-12 of kind+key-fields>",
-//       "kind": "resume-ready|unfocused-autonomous|stale-converged|budget-reset|keyoku-ripe",
+//       "kind": "resume-ready|unfocused-autonomous|stale-converged|budget-reset|keyoku-ripe|orphaned-loop",
 //       "summary": "<sanitized ≤200>", "evidence": { …exact figures + source path },
 //       "suggested_create": { …belay_loop_create args }, "created_at": <epoch>,
 //       "status": "open|dismissed|armed", "surfaced_count": n } ] }
@@ -159,6 +159,46 @@ function scanRipe(now) {
   return out;
 }
 
+/** S6 — orphaned loop (ADR-21): an armed, session-pinned, non-paused loop whose arming
+ *  session is no longer active in tokenroom's sessions.json. When the arming session dies
+ *  (crash, or a compaction restart that mints a new session id) the focus stays pinned to a
+ *  dead session — every other session gets scope-mismatch silent allows and the loop is
+ *  invisible at SessionStart forever (S2 excludes focused goals; S4 only covers paused).
+ *  Conservative: if tokenroom's sessions.json is absent we CANNOT tell a session is dead, so
+ *  no signal is raised (never a false orphan). */
+function scanOrphanedLoops(now) {
+  const entries = Object.entries(readLoops().loops);
+  if (!entries.length) return [];
+  const sessMap = readJSON(join(tokenroomDir(), 'sessions.json'));
+  if (!sessMap || typeof sessMap !== 'object' || Array.isArray(sessMap)) return []; // can't prove any session dead
+  const ACTIVE_SEC = 30 * 60;
+  const isActive = (sid) => {
+    const e = sessMap[sid];
+    const at = e && typeof e === 'object' ? toEpochSec(e.at) : null;
+    return at != null && now - at <= ACTIVE_SEC;
+  };
+  const focus = readJSON(join(keyokuHome(), 'focus.json'));
+  const focusId = focus && typeof focus === 'object' && typeof focus.goalId === 'string' ? focus.goalId : null;
+  const source = join(belayDir(), 'loops.json');
+  const out = [];
+  for (const [goalId, e] of entries) {
+    if (!e || typeof e !== 'object' || e.armed !== true || e.paused === true) continue;
+    const sid = typeof e.session_id === 'string' && e.session_id ? e.session_id : null;
+    if (!sid || isActive(sid)) continue; // global/unpinned loop, or its arming session is alive
+    const gid = sanitizeSlug(goalId);
+    const focused = goalId === focusId;
+    out.push({
+      id: hashId('orphaned-loop', goalId, sid),
+      kind: 'orphaned-loop',
+      summary: sanitizeText(`loop for goal '${gid}' is armed but pinned to session ${sanitizeSlug(sid, 16)} which is no longer active — resume it in THIS session (re-arm with your session_id) or disarm it`, 200),
+      evidence: { goalId: gid, pinned_session: sanitizeSlug(sid, 24), focused, source },
+      suggested_create: focused ? { goal: gid } : null, // re-arm here when it is still the focused goal
+      suggested_action: { tool: 'belay_loop_disarm', arguments: { goal: goalId } },
+    });
+  }
+  return out;
+}
+
 /** S4 predicate — is the 5h budget fresh? Either the window just reset (resets_at < now
  *  <= resets_at + 30min: the crossedReset band readBudget treats as UNKNOWN — quota just
  *  refilled), or a known fresh reading with >=85% left. Returns the evidence or null. */
@@ -192,6 +232,7 @@ export function scan({ nowSec: now = Date.now() / 1000 } = {}) {
     if (s1) fresh.push(s1);
     fresh.push(...scanGoals(now, cfg));
     fresh.push(...scanRipe(now));
+    fresh.push(...scanOrphanedLoops(now));
 
     // S4 — amplifier, never standalone: decorate the S1 proposal(s), and surface each
     // PAUSED loop as a resume-it proposal (the only actionable attachment a paused loop has).

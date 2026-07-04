@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { homes, run, goal, focusFor, writeKeyoku, writeResume, writeRipe } from './helpers.mjs';
+import { homes, run, goal, focusFor, obs, writeKeyoku, writeLoops, writeResume, writeRipe } from './helpers.mjs';
 
 // T2: `belay hook session-start` — the morning briefing (DESIGN §4.2, ADR-11).
 // Spawn-based against hermetic homes: zero open proposals → ZERO output; open proposals →
@@ -24,6 +24,28 @@ const nGoals = (n) => Array.from({ length: n }, (_, i) => goal({ id: `goal_${i}`
 test('zero signals → zero output, exit 0 (silent no-op posture)', () => {
   const h = homes();
   const r = hook(h);
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout, '');
+});
+
+test('compaction re-briefing: a mid-flight focused autonomous loop is re-injected (ADR-21)', () => {
+  const h = homes();
+  writeKeyoku(h, { goals: [goal()], focus: focusFor({ sessionId: 's1' }), obsLines: [obs()] });
+  const r = run(h, ['hook', 'session-start'], { session_id: 's1', cwd: '/tmp/proj' });
+  assert.equal(r.status, 0);
+  const ctx = contextOf(r);
+  assert.match(ctx, /MID-LOOP on autonomous goal 'ship-widget'/);
+  assert.match(ctx, /objective: ship the widget/);
+  assert.match(ctx, /unmet: c1: tests green; c2: deployed to prod/);
+  assert.match(ctx, /continuations 0\/25/);
+  assert.match(ctx, /goal_assess to re-establish ground truth/);
+});
+
+test('a PAUSED loop is not re-briefed (the rope is released)', () => {
+  const h = homes();
+  writeKeyoku(h, { goals: [goal()], focus: focusFor({ sessionId: 's1' }), obsLines: [obs()] });
+  writeLoops(h, { goal_test1: { paused: true } });
+  const r = run(h, ['hook', 'session-start'], { session_id: 's1', cwd: '/tmp/proj' });
   assert.equal(r.status, 0);
   assert.equal(r.stdout, '');
 });

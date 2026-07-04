@@ -2,10 +2,13 @@ import { join } from 'node:path';
 import { belayDir, ensureDir, atomicWriteJSON, readJSON } from './util.mjs';
 
 // Belay's OWN state: ~/.belay/state.json — one tiny counter record per session.
-//   { sessions: { <session_id>: { goalId, continuations, staleBlocked, updated_at } } }
+//   { sessions: { <session_id>: { goalId, continuations, staleBlocked, lastUnmetHash,
+//                                 sameUnmetCount, updated_at } } }
 // continuations = how many times the Stop hook has blocked (continued) this session on
-// this goal; staleBlocked = whether the single "run goal_assess first" block was spent.
-// Both reset when the session's focused goalId changes. Entries self-prune after 7 days.
+// this goal; staleBlocked = whether the single "run goal_assess first" block was spent;
+// lastUnmetHash + sameUnmetCount = thrash detection (ADR-21) — how many consecutive blocks
+// have carried the SAME unmet set (so the guidance can switch to "change strategy"). All
+// reset when the session's focused goalId changes. Entries self-prune after 7 days.
 
 const PRUNE_SEC = 7 * 86400;
 const statePath = () => join(belayDir(), 'state.json');
@@ -24,9 +27,11 @@ export function sessionEntry(state, sessionId, goalId) {
       goalId,
       continuations: typeof e.continuations === 'number' && Number.isFinite(e.continuations) && e.continuations >= 0 ? e.continuations : 0,
       staleBlocked: e.staleBlocked === true,
+      lastUnmetHash: typeof e.lastUnmetHash === 'string' ? e.lastUnmetHash : null,
+      sameUnmetCount: typeof e.sameUnmetCount === 'number' && Number.isFinite(e.sameUnmetCount) && e.sameUnmetCount >= 0 ? e.sameUnmetCount : 0,
     };
   }
-  return { goalId, continuations: 0, staleBlocked: false };
+  return { goalId, continuations: 0, staleBlocked: false, lastUnmetHash: null, sameUnmetCount: 0 };
 }
 
 export function saveSessionEntry(state, sessionId, entry, nowSec = Date.now() / 1000) {

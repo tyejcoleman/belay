@@ -470,3 +470,52 @@ test('config overrides: max_continuations and stale_assess_min honored; bad conf
   assert.equal(r.stdout, '');
   assert.match(r.stderr, /\(1\/1 this session\)/);
 });
+
+// ── ADR-21: thrash-aware + wrap-up Stop guidance (the intelligence layer) ────────────────
+
+test('thrash detection: the SAME unmet set across N blocks switches to change-strategy guidance', () => {
+  const h = homes();
+  writeKeyoku(h, { goals: [goal()], focus: focusFor(), obsLines: [obs()] });
+  writeTokenroom(h, { leftPct: 72 });
+  mkdirSync(h.belay, { recursive: true });
+  writeFileSync(join(h.belay, 'config.json'), JSON.stringify({ thrash_threshold: 3 }));
+  const b1 = JSON.parse(stop(h).stdout); // 0→1
+  assert.match(b1.reason, /Pick ONE unmet criterion/);
+  JSON.parse(stop(h, stopPayload({ stop_hook_active: true })).stdout); // →2
+  const b3 = JSON.parse(stop(h, stopPayload({ stop_hook_active: true })).stdout); // →3, thrash
+  assert.equal(b3.decision, 'block');
+  assert.match(b3.reason, /SAME criteria have not moved across 3 assessments/);
+  assert.match(b3.reason, /CHANGE strategy/);
+  const st = JSON.parse(readFileSync(join(h.belay, 'state.json'), 'utf8'));
+  assert.equal(st.sessions.s1.sameUnmetCount, 3);
+});
+
+test('thrash counter RESETS when the unmet set changes (real progress is detected)', () => {
+  const h = homes();
+  writeKeyoku(h, { goals: [goal()], focus: focusFor(), obsLines: [obs()] }); // unmet c1, c2
+  writeTokenroom(h, { leftPct: 72 });
+  mkdirSync(h.belay, { recursive: true });
+  writeFileSync(join(h.belay, 'config.json'), JSON.stringify({ thrash_threshold: 2 }));
+  stop(h); // count 1
+  stop(h, stopPayload({ stop_hook_active: true })); // count 2 (would be thrash next)
+  writeKeyoku(h, { obsLines: [obs({ unmet: ['c1'] })] }); // progress: c2 now met
+  const b = JSON.parse(stop(h, stopPayload({ stop_hook_active: true })).stdout);
+  const st = JSON.parse(readFileSync(join(h.belay, 'state.json'), 'utf8'));
+  assert.equal(st.sessions.s1.sameUnmetCount, 1); // reset by the changed set
+  assert.match(b.reason, /Pick ONE unmet criterion/); // not thrashing
+});
+
+test('final held continuation emits a wrap-up directive, not a silent release', () => {
+  const h = homes();
+  writeKeyoku(h, { goals: [goal()], focus: focusFor(), obsLines: [obs()] });
+  writeTokenroom(h, { leftPct: 72 });
+  mkdirSync(h.belay, { recursive: true });
+  writeFileSync(join(h.belay, 'config.json'), JSON.stringify({ max_continuations: 2 }));
+  const b1 = JSON.parse(stop(h).stdout); // 0→1, not last
+  assert.match(b1.reason, /Pick ONE unmet criterion/);
+  const b2 = JSON.parse(stop(h, stopPayload({ stop_hook_active: true })).stdout); // 1→2, LAST
+  assert.equal(b2.decision, 'block');
+  assert.match(b2.reason, /LAST held continuation \(2\/2\)/);
+  assert.match(b2.reason, /do NOT claim success/);
+  assert.equal(stop(h, stopPayload({ stop_hook_active: true })).stdout, ''); // then release
+});
