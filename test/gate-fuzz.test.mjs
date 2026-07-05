@@ -160,6 +160,18 @@ test('control-file tampering is gated: writes to ~/.keyoku and ~/.belay route to
   assert.equal(cls('grep foo ~/.belay/config.json'), null);
 });
 
+test('control-file tampering catches the ACTUALLY configured dir, not just the .belay/.keyoku names', () => {
+  const prev = process.env.BELAY_DIR;
+  process.env.BELAY_DIR = '/tmp/custom-belay-home-xyz';
+  try {
+    assert.equal(cls('echo x > /tmp/custom-belay-home-xyz/config.json'), 'control-file tampering');
+    assert.equal(cls('cat /tmp/custom-belay-home-xyz/config.json'), null); // a read is still fine
+  } finally {
+    if (prev === undefined) delete process.env.BELAY_DIR;
+    else process.env.BELAY_DIR = prev;
+  }
+});
+
 test('goal_focus is gated (re-focusing to another goal displaces the arrest — refute F1)', () => {
   const c = (name) => classify(name, '', '/p', cfg)?.class ?? null;
   assert.equal(c('mcp__keyoku__goal_focus'), 'loop control');

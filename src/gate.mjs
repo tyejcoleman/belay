@@ -1,8 +1,8 @@
 import { resolve } from 'node:path';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
-import { readStdin, readConfig, toRegExp, capReason, sanitizeText } from './util.mjs';
-import { readKeyoku } from './keyoku.mjs';
+import { readStdin, readConfig, toRegExp, capReason, sanitizeText, belayDir } from './util.mjs';
+import { readKeyoku, keyokuHome } from './keyoku.mjs';
 import { readBudget } from './budget.mjs';
 import { appendPending } from './pending.mjs';
 
@@ -130,9 +130,22 @@ const LOOP_CONTROL_ASK = /^mcp__(belay__belay_loop_disarm|keyoku__goal_(focus|un
 // any write-ish command targeting them routes to the human. Pure reads are left alone.
 const CONTROL_DIR = /\.(keyoku|belay)\b/;
 const WRITE_UTIL = /(?:^|[\s;|&`(\\])(?:[\w./-]*\/)?(?:touch|rm|mv|cp|sed|tee|dd|ln|truncate|chmod|chown|install|unlink|shred|mkdir|rmdir|python3?|node|perl)\b/i;
+/** Does the command reference belay's or keyoku's control dir — by the default `.keyoku`/`.belay`
+ *  names OR by the ACTUALLY configured path (env overrides like BELAY_DIR don't use the dotted
+ *  names, so the literal-name check alone was blind to them). */
+function referencesControlDir(command) {
+  if (CONTROL_DIR.test(command)) return true;
+  try {
+    const b = belayDir();
+    const k = keyokuHome();
+    return (!!b && command.includes(b)) || (!!k && command.includes(k));
+  } catch {
+    return false; // env read failed → literal names only
+  }
+}
 export function controlFileTamper(command) {
   if (typeof command !== 'string' || !command) return false;
-  if (!CONTROL_DIR.test(command)) return false;
+  if (!referencesControlDir(command)) return false;
   return /[12]?>>?/.test(command) || WRITE_UTIL.test(command); // a redirect, or a mutating utility, alongside the control dir
 }
 
