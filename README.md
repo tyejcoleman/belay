@@ -36,15 +36,24 @@ rewrites keyoku's state files itself. That's the compliance line, on purpose.
 - **Stop hook** — when the agent tries to stop while a scope-matched, focused,
   **autonomous** Keyoku goal still has unmet criteria, belay blocks the stop and
   hands back the unmet criteria (with descriptions) plus the current budget picture.
-  When there is nothing to hold — no focus, human-in-the-loop autonomy, converged,
-  paused loop, quota-dead, counters exhausted — it allows the stop, silently.
+  The guidance is **thrash-aware** (ADR-21): when the same criteria won't move across
+  several assessments it switches from "keep going" to "run the probe yourself, diagnose,
+  CHANGE strategy," and a hopelessly stalled loop gets one escalation block then releases
+  early — so it refuses to spin. When there is nothing to hold — no focus, human-in-the-loop
+  autonomy, converged, paused loop, quota-dead, counters exhausted — it allows the stop,
+  silently. On a compaction restart, SessionStart re-briefs the live loop so it never resumes blind.
 - **PreToolUse gate** — only while an autonomous goal is focused, irreversible/external
-  actions (`git push`, `npm publish`, `gh pr merge`, `rm -rf` outside cwd, curl/wget
-  writes to non-localhost, MCP send/publish tools) are routed to the **human** via
-  `permissionDecision: "ask"` — or, with `gate_mode: "defer"`, **denied with guidance**
-  and queued in `~/.belay/pending.json` for one batched review at convergence (ADR-16;
-  deny is strictly safer than ask). Expensive spawns (Task/Agent/Workflow) are asked
-  about under thin budget in both modes. Everything else passes untouched.
+  actions route to the **human**. The classifier is **wrapper-aware** (ADR-18): it scans the
+  whole command, so `git push` / `npm publish` / `gh` mutations / `gh api` writes / `rm -rf`
+  outside cwd / `curl`·`wget` non-GET writes are caught even behind `sh -c '…'`, `eval`,
+  backticks, `$(…)`, a subshell, or a `\`-escape. Coverage of your own stack (docker, kubectl,
+  terraform, aws, …) is a **config-driven table** (`danger_binaries`) — one line each. Two HARD
+  classes protect the harness itself (ADR-19): **loop control** (`belay_loop_disarm`, keyoku
+  `goal_focus`/`unfocus`/`update`/`converge`/`delete` — no self-liberation, no verifier
+  tampering) and **control-file tampering** (writes to `~/.belay`·`~/.keyoku`). Default mode
+  routes to `permissionDecision: "ask"`; `gate_mode: "defer"` **denies with guidance** and queues
+  for one batched review (`belay pending`, ADR-16). Expensive spawns are asked about under thin
+  budget. Everything else passes untouched.
 - **SessionStart briefing** — a <50ms pure-file scan surfaces up to 3 open loop
   *proposals* (deferred work past its resume time, unfocused autonomous goals,
   stale-converged goals, keyoku's own ripe suggestions) as `additionalContext`.
@@ -319,7 +328,13 @@ ever, from a hook. Errors are silent (never-crash rule).
   "spawn_floor_pct": 10,         // below this (no fresh alt): ask before new subagents
   "thin_budget_pct": 15,         // below this the block reason switches to descent wording
   "stale_assess_min": 60,        // observations older than this trigger the one stale-block
+  "thrash_threshold": 3,         // identical-unmet blocks before the reason switches to "change strategy" (ADR-21)
+  "thrash_release": 8,           // identical-unmet blocks before belay escalates then RELEASES a stalled loop early (adaptive budget)
   "gate_enabled": true,          // PreToolUse gate master switch
+  "danger_binaries": {           // extend the built-in danger table (ADR-18) for YOUR stack, one line each;
+    "aws": ["*"],                //   "*" = the whole binary is dangerous (ask on every invocation)
+    "kubectl": ["apply"]         //   or a list of dangerous subcommands. Unioned over the built-in defaults
+  },                             //   (docker push / terraform apply|destroy / kubectl delete / helm / pnpm|yarn|bun publish / vercel deploy / …)
   "gate_mode": "ask",            // 'ask' (default): route irreversibles to the human live;
                                  // 'defer': deny-with-guidance + queue for one batched review
                                  // at convergence (`belay pending`) — strictly safer (ADR-16)
@@ -339,7 +354,8 @@ ever, from a hook. Errors are silent (never-crash rule).
   "proposals_enabled": true,     // master switch for the proposal scan + SessionStart surfacing
   "proposal_max_surfaced": 3,    // proposals per SessionStart injection
   "stale_converged_days": 7,     // converged goals older than this become re-assess proposals
-  "keyoku_call_timeout_ms": 15000 // per keyoku-child JSON-RPC call (ADR-10)
+  "keyoku_call_timeout_ms": 15000, // per keyoku-child JSON-RPC call (ADR-10)
+  "retro_auto_push": false       // on disarm, also file the loop retro into keyoku's knowledge store (opt-in; spawns keyoku)
 }
 ```
 
@@ -361,7 +377,9 @@ belay bundle [--dry-run] [--config-dir <dir>] [--tokenroom <path>]   wire the wh
 belay install [--dry-run] [--config-dir <dir>] [--no-mcp]   register the Stop + PreToolUse + SessionStart hooks + the MCP server (additive)
 belay uninstall [--config-dir <dir>]             remove only belay's entries
 belay status      # focused goal + loop arm/pause + would-block verdict + counters + open proposals
-belay doctor      # full-stack health: keyoku layout + version pin, tokenroom, hooks, MCP registration, loops/proposals state, config
+belay insights    # how belay is ACTUALLY behaving in production (mines its own decision journal + retros): no-op rate, fall-arrest by class, hook liveness
+belay selftest    # canary: prove the enforcement path blocks/arrests on THIS install (incl. behind a shell wrapper) + confirm the live harness is firing the hooks
+belay doctor      # full-stack health: keyoku layout + version pin, tokenroom, hooks (with dead-path check), MCP registration, loops/proposals state, config
 belay mcp         # stdio MCP server (belay_status, belay_loop_*, belay_propose) — registered by install
 belay loop create [--goal <slug|id>] [--objective <text> --criteria <json>]
                   [--constraints <json>] [--max-iterations <n>] [--confirm-autonomous]
@@ -370,7 +388,8 @@ belay loop create [--goal <slug|id>] [--objective <text> --criteria <json>]
 belay loop list                            loop-relevant goals × arm/pause state × counters
 belay loop pause <goal> [--note <text>]    pause the Stop hold (the fall-arrest gate stays active)
 belay loop resume <goal>                   resume (re-demands a fresh goal_assess)
-belay loop disarm <goal>                   unfocus via keyoku + clear arm state
+belay loop disarm <goal>                   unfocus via keyoku + clear arm state (captures a retro)
+belay loop retro [<goal> [--no-push] | --limit n]   record a loop's retro (thrash/convergence telemetry); with a goal, file it into keyoku's knowledge store
 belay propose [--dismiss <id>]             scan for loop-worthy signals; advisory, never auto-armed
 belay pending [--clear | --remove <id>]    review actions deferred by gate_mode 'defer' (denied + queued for batched approval)
 belay hook <stop|pre-tool-use|session-start>   # wired by install

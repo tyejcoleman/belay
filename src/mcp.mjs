@@ -30,7 +30,7 @@ export const PROTOCOL_VERSION = '2025-06-18';
 // negotiate DOWN to a supported one instead of echoing whatever the client sent (hook-F8):
 // echoing an unknown future version claims framing semantics we may not implement.
 export const SUPPORTED_PROTOCOLS = new Set(['2025-06-18', '2025-03-26', '2024-11-05']);
-export const SERVER_INFO = { name: 'belay', version: '0.3.0' }; // kept in lockstep with package.json (scaffold test asserts it)
+export const SERVER_INFO = { name: 'belay', version: '0.4.0' }; // kept in lockstep with package.json (scaffold test asserts it)
 
 /** The 7-tool surface — schemas are the DESIGN.md §2.2 contract, verbatim. FROZEN. */
 export const TOOLS = [

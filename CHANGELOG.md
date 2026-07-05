@@ -8,7 +8,11 @@
 > feeds rope, the PreToolUse gate is the fall-arrest. **Entries below this line predate the
 > rename and name the tool "conductor"; they are kept verbatim as accurate history.**
 
-## Unreleased
+## 0.4.0 — hardened arrest, intelligence layer, self-observability
+
+A four-reviewer audit + refute pass drove the fall-arrest from bypassable to wrapper-proof,
+added the coaching layer that makes a weaker model's autonomous runs bounded/safe/honest, and
+gave belay eyes on its own enforcement. ADR-18..22. 240 tests (from 204). Highlights below.
 
 ### System v2 — belay watches its own enforcement (ADR-22)
 
