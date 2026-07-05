@@ -14,6 +14,15 @@ A four-reviewer audit + refute pass drove the fall-arrest from bypassable to wra
 added the coaching layer that makes a weaker model's autonomous runs bounded/safe/honest, and
 gave belay eyes on its own enforcement. ADR-18..22. 240 tests (from 204). Highlights below.
 
+### Catch-mode — the denylist becomes semantically complete (ADR-17 ext)
+
+- **`slm_catch`** (config, default false; requires `slm_enabled`): the mirror of the refine
+  adjudicator. Stage 1 is a denylist and is fundamentally incomplete (`$(echo git) push`,
+  `eval $var`, a binary not in the table); catch-mode consults the learned daemon on a stage-1
+  MISS and lets it ADD an ask/defer for a dangerous command the denylist can't express. Safe to
+  trust an untrusted daemon here because catch only ever ADDS friction — an absent/slow/malformed
+  daemon can at worst over-ask, never fail open (byte-identical to catch off on any failure).
+
 ### System v2 — belay watches its own enforcement (ADR-22)
 
 - **`belay insights`** mines belay's own decision journal + retros + pending into a read on how

@@ -436,6 +436,17 @@ on stage 1, the ADR-4 posture). The fail-safe is provable and tested: with the d
 **stopped** and `slm_enabled: true`, gate output is byte-identical to 0.3.0 for every
 class (`test/gate-slm.test.mjs`, the plan's convergence criterion c7).
 
+*(2026-07-04 — catch-mode, `slm_catch` default false: the mirror of refine. Stage 1 is a
+denylist and is fundamentally incomplete (`$(echo git) push`, `eval $var`, a binary not in the
+table); catch-mode consults the daemon on a stage-1 MISS and lets it ADD an ask/defer for a
+command the denylist can't express (`catchVerdict`). This is the SAFE direction to trust an
+untrusted daemon: catch only ever ADDS friction, so an absent/slow/malformed/compromised daemon
+can at worst cause an over-ask — never a fail-open (any non-`ask`/`defer`, low-confidence, abstain,
+timeout, or bad response → the command passes, byte-identical to catch off). It runs only for a
+real command under a focused autonomous goal, respects `gate_mode` (ask, or defer-queue), and
+`decideGate` stays pure — the network call lives in the hook, exactly like refine. Requires
+`slm_enabled`; both default off.)*
+
 ## ADR-18 — wrapper-aware, config-extensible command classification *(2026-07-03)*
 
 **Decision:** The gate classifies dangerous Bash by SCANNING the whole command string for the

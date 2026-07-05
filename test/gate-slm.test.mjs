@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { bin, env, homes, run, goal, focusFor, obs, writeKeyoku, toolPayload } from './helpers.mjs';
-import { mergeVerdict, HARD_CLASSES, SOFT_CLASSES } from '../src/gate.mjs';
+import { mergeVerdict, catchVerdict, HARD_CLASSES, SOFT_CLASSES } from '../src/gate.mjs';
 
 // T1/T2: stage-2 learned-adjudicator hook (ADR-17). The daemon is UNTRUSTED input and the
 // contract is refine-only + fail-safe-first: slm_enabled false or ANY daemon failure must
@@ -403,4 +403,94 @@ test('mergeVerdict: HARD class is never unlocked — decision unchanged, rationa
   assert.doesNotMatch(withRationale.reason, /\n/, 'rationale is sanitized (ADR-7)');
   // malformed response on a HARD class → untouched stage-1
   assert.equal(mergeVerdict(hit, s1, { rationale: 'x' }, cfg), s1);
+});
+
+// ── catch-mode (ADR-17 ext): daemon may ADD an ask on a stage-1 MISS (add-friction only) ──
+
+test('catch-mode: a novel command the denylist misses is gated when the daemon flags it', async () => {
+  const d = await startDaemon((_b, respond) => respond(200, { v: 1, verdict: 'ask', confidence: 0.96, abstain: false, rationale: 'wipes the production datastore' }));
+  try {
+    const h = armedWith({ slm_enabled: true, slm_catch: true, slm_url: d.url });
+    const o = JSON.parse((await gateAsync(h, toolPayload({ tool_input: { command: 'frobctl wipe --all' } }))).stdout).hookSpecificOutput;
+    assert.equal(o.permissionDecision, 'ask');
+    assert.match(o.permissionDecisionReason, /learned adjudicator flagged/);
+    assert.match(o.permissionDecisionReason, /wipes the production datastore/);
+    assert.equal(d.calls[0].mode, 'catch');
+  } finally {
+    await d.close();
+  }
+});
+
+test('catch-mode: the daemon saying allow leaves a missed command passing untouched', async () => {
+  const d = await startDaemon((_b, respond) => respond(200, { v: 1, verdict: 'allow', confidence: 0.99, abstain: false }));
+  try {
+    const h = armedWith({ slm_enabled: true, slm_catch: true, slm_url: d.url });
+    assert.equal((await gateAsync(h, toolPayload({ tool_input: { command: 'ls -la' } }))).stdout, '');
+  } finally {
+    await d.close();
+  }
+});
+
+test('catch-mode is fail-safe: an unreachable or low-confidence daemon lets the command pass', async () => {
+  const port = await deadPort();
+  const down = armedWith({ slm_enabled: true, slm_catch: true, slm_url: `http://127.0.0.1:${port}/adjudicate`, slm_timeout_ms: 300 });
+  assert.equal((await gateAsync(down, toolPayload({ tool_input: { command: 'frobctl wipe --all' } }))).stdout, '');
+  const d = await startDaemon((_b, respond) => respond(200, { v: 1, verdict: 'ask', confidence: 0.5, abstain: false }));
+  try {
+    const h = armedWith({ slm_enabled: true, slm_catch: true, slm_url: d.url });
+    assert.equal((await gateAsync(h, toolPayload({ tool_input: { command: 'frobctl wipe --all' } }))).stdout, '');
+  } finally {
+    await d.close();
+  }
+});
+
+test('catch-mode off (slm_catch:false) never consults the daemon on a stage-1 miss', async () => {
+  const d = await startDaemon((_b, respond) => respond(200, { v: 1, verdict: 'ask', confidence: 0.99, abstain: false }));
+  try {
+    const h = armedWith({ slm_enabled: true, slm_catch: false, slm_url: d.url });
+    assert.equal((await gateAsync(h, toolPayload({ tool_input: { command: 'frobctl wipe --all' } }))).stdout, '');
+    assert.equal(d.calls.length, 0);
+  } finally {
+    await d.close();
+  }
+});
+
+test('catch-mode never runs when stage-1 already caught the action (HARD hit unchanged)', async () => {
+  const d = await startDaemon((_b, respond) => respond(200, { v: 1, verdict: 'allow', confidence: 1, abstain: false }));
+  try {
+    const h = armedWith({ slm_enabled: true, slm_catch: true, slm_url: d.url });
+    const o = JSON.parse((await gateAsync(h, toolPayload({ tool_input: { command: 'git push origin main' } }))).stdout).hookSpecificOutput;
+    assert.equal(o.permissionDecision, 'ask'); // still gated by stage 1
+    assert.equal(d.calls.length, 0); // HARD hit → daemon never consulted
+  } finally {
+    await d.close();
+  }
+});
+
+test('catch-mode in gate_mode:defer denies + queues the caught action', async () => {
+  const d = await startDaemon((_b, respond) => respond(200, { v: 1, verdict: 'ask', confidence: 0.97, abstain: false, rationale: 'irreversible' }));
+  try {
+    const h = armedWith({ slm_enabled: true, slm_catch: true, gate_mode: 'defer', slm_url: d.url });
+    const o = JSON.parse((await gateAsync(h, toolPayload({ tool_input: { command: 'frobctl wipe --all' } }))).stdout).hookSpecificOutput;
+    assert.equal(o.permissionDecision, 'deny');
+    assert.match(o.permissionDecisionReason, /deferred/);
+    assert.equal(JSON.parse(readFileSync(join(h.belay, 'pending.json'), 'utf8')).pending[0].class, 'slm-flagged');
+  } finally {
+    await d.close();
+  }
+});
+
+test('catchVerdict unit: gates deny/ask at >=τ non-abstain; passes allow/low-conf/abstain/malformed', () => {
+  const cfg = { slm_min_confidence: 0.9, gate_mode: 'ask' };
+  const deny = (o = {}) => ({ v: 1, verdict: 'ask', confidence: 0.95, abstain: false, ...o });
+  assert.equal(catchVerdict(deny(), cfg)?.decision, 'ask');
+  assert.equal(catchVerdict(deny({ verdict: 'ask' }), cfg)?.decision, 'ask');
+  assert.equal(catchVerdict(deny({ confidence: 0.5 }), cfg), null);
+  assert.equal(catchVerdict(deny({ abstain: true }), cfg), null);
+  assert.equal(catchVerdict({ v: 1, verdict: 'allow', confidence: 1, abstain: false }, cfg), null);
+  assert.equal(catchVerdict(null, cfg), null);
+  assert.equal(catchVerdict({ garbage: true }, cfg), null);
+  const dv = catchVerdict(deny(), { slm_min_confidence: 0.9, gate_mode: 'defer' }, { command: 'x', tool_name: 'Bash' });
+  assert.equal(dv.decision, 'deny');
+  assert.equal(dv.defer.class, 'slm-flagged');
 });

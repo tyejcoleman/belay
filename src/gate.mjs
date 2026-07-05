@@ -453,6 +453,33 @@ export function mergeVerdict(stage1Hit, stage1Decision, slmResponse, cfg) {
   return stage1Decision; // 'ask', 'defer' outside defer mode, low-confidence 'allow'
 }
 
+/**
+ * Catch-mode (ADR-17 extension): stage 1 found NOTHING (the denylist is fundamentally incomplete
+ * — `$(echo git) push`, `eval $var`, a binary not in the table). The daemon is asked whether the
+ * command is dangerous ANYWAY. Because catch only ever ADDS friction, an untrusted/broken/slow
+ * daemon can at worst cause an over-ask — NEVER a fail-open — so it is safe to trust on the
+ * stage-1-miss path. Acceptance bar mirrors refine but in the safe direction: a well-formed,
+ * non-abstaining, high-confidence 'deny'/'ask' verdict → gate it (ask, or a defer-queue deny in
+ * `gate_mode:'defer'`); anything else (allow / abstain / low-confidence / malformed / absent) →
+ * null (the command passes, byte-identical to catch-mode being off). Pure — the network call
+ * lives in the hook. Returns a decision object or null.
+ */
+export function catchVerdict(slmResponse, cfg, ctx = {}) {
+  if (!wellFormedVerdict(slmResponse) || slmResponse.abstain !== false) return null;
+  // The §3 verdict enum is allow|defer|ask (there is no 'deny'): the daemon flags danger by
+  // asking for friction (`ask` or `defer`). Accept those at/above τ; `allow`/low-confidence → pass.
+  if ((slmResponse.verdict !== 'ask' && slmResponse.verdict !== 'defer') || slmResponse.confidence < cfg.slm_min_confidence) return null;
+  const why = typeof slmResponse.rationale === 'string' && slmResponse.rationale ? ` — ${sanitizeText(slmResponse.rationale, 160)}` : '';
+  if (cfg.gate_mode === 'defer') {
+    return {
+      decision: 'deny',
+      reason: capReason(`[belay] the learned adjudicator flagged this action under an autonomous goal — deferred and queued for batched human approval; continue with sandbox-safe work${why}`),
+      defer: { class: 'slm-flagged', tool_name: typeof ctx.tool_name === 'string' ? ctx.tool_name : '', command: (typeof ctx.command === 'string' ? ctx.command : '').slice(0, 500) },
+    };
+  }
+  return { decision: 'ask', reason: capReason(`[belay] the learned adjudicator flagged this action as irreversible/dangerous under an autonomous goal — requires human approval${why}`) };
+}
+
 /** POST the §3 request to the adjudicator daemon. Resolves the parsed response object,
  *  or null on ANY failure — timeout (AbortController hard cap), connection refused,
  *  non-200, oversized body, bad JSON. NEVER rejects and never throws: null means
@@ -517,25 +544,38 @@ export async function hookPreToolUse() {
     const k = readKeyoku({ sessionId: p.session_id, cwd: p.cwd });
     if (!k.present || k.paused || !k.focus || !k.matched || !k.goal) return;
     const budget = SPAWN_TOOLS.includes(p.tool_name) ? readBudget(p.session_id) : null;
+    const command = typeof p.tool_input?.command === 'string' ? p.tool_input.command : '';
+    const toolName = typeof p.tool_name === 'string' ? p.tool_name : '';
+    const mode = typeof p.permission_mode === 'string' ? p.permission_mode : 'default';
     let d = decideGate(p, k, budget, cfg);
-    if (!d) return;
-    // Stage 2 (ADR-17): consult the learned adjudicator ONLY for a SOFT-class hit with
-    // slm_enabled — never for HARD classes (not unlockable, so the call is pure latency),
-    // never for the spawn-budget ask (no `hit`), and never under bypassPermissions (the
-    // one mode where no prompt of any kind reaches a human, the ADR-13 deny stays final).
-    // decideGate itself stays pure: the network call lives here, in the hook, only.
-    if (cfg.slm_enabled && d.hit && !HARD_CLASSES.has(d.hit.class) && p.permission_mode !== 'bypassPermissions') {
-      const command = typeof p.tool_input?.command === 'string' ? p.tool_input.command : '';
+    if (!d) {
+      // Catch-mode (ADR-17 ext): stage 1 found nothing. If enabled, ask the daemon whether the
+      // command is dangerous ANYWAY — closes the denylist's incompleteness. Only for a real
+      // command; add-friction only, so ANY daemon failure → the command passes (byte-identical to
+      // catch-mode off). decideGate stays pure; the network call is here.
+      if (cfg.slm_enabled && cfg.slm_catch && command) {
+        const slm = await adjudicate(
+          cfg.slm_url,
+          { v: 1, mode: 'catch', tool_name: toolName, command, cwd: typeof p.cwd === 'string' ? p.cwd : '', goal: { id: k.goal.id, autonomy: k.goal.autonomy }, permission_mode: mode },
+          cfg.slm_timeout_ms
+        );
+        d = escalateForBypass(p, catchVerdict(slm, cfg, { tool_name: toolName, command }));
+      }
+      if (!d) return;
+    } else if (cfg.slm_enabled && d.hit && !HARD_CLASSES.has(d.hit.class) && mode !== 'bypassPermissions') {
+      // Refine (ADR-17): a SOFT-class stage-1 hit may be UNLOCKED by a calibrated allow. Never for
+      // HARD classes (not unlockable), never for the spawn-budget ask (no `hit`), never under
+      // bypassPermissions (the ADR-13 deny stays final).
       const slm = await adjudicate(
         cfg.slm_url,
         {
           v: 1,
-          tool_name: typeof p.tool_name === 'string' ? p.tool_name : '',
+          tool_name: toolName,
           command,
           cwd: typeof p.cwd === 'string' ? p.cwd : '',
           stage1: { class: d.hit.class, decision: d.decision },
           goal: { id: k.goal.id, autonomy: k.goal.autonomy },
-          permission_mode: typeof p.permission_mode === 'string' ? p.permission_mode : 'default',
+          permission_mode: mode,
         },
         cfg.slm_timeout_ms
       );

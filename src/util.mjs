@@ -138,6 +138,7 @@ export const CONFIG_DEFAULTS = {
   allow_overrides: [], // [pattern] force-allow, matched before any ask class
   danger_binaries: {}, // {binary: [subcommands] | ['*']} — extends the built-in danger table (ADR-18); merged over gate.mjs DEFAULT_DANGER_BINARIES
   slm_enabled: false, // stage-2 learned adjudicator (ADR-17): opt-in; SOFT classes only; fail-safe = stage-1
+  slm_catch: false, // catch-mode (ADR-17 ext): also consult the daemon on a stage-1 MISS to gate novel dangerous commands the denylist can't express (add-friction only; requires slm_enabled)
   slm_url: 'http://127.0.0.1:8642/adjudicate', // local adjudicator daemon endpoint (CGS GATE-ADJUDICATOR-PLAN §3)
   slm_timeout_ms: 1500, // hard AbortController cap on the stage-2 POST; on breach the stage-1 decision stands
   slm_min_confidence: 0.9, // a SOFT-class 'allow' verdict is accepted only at/above this confidence (calibrated τ)
@@ -176,7 +177,7 @@ export function validateConfig(raw) {
     if (typeof raw[key] === 'number' && Number.isFinite(raw[key]) && raw[key] >= min) cfg[key] = raw[key];
     else warnings.push(`config: ${key} must be a ${min > 0 ? `number >= ${min}` : 'non-negative number'} — using default ${CONFIG_DEFAULTS[key]}`);
   }
-  for (const key of ['gate_enabled', 'proposals_enabled', 'slm_enabled', 'retro_auto_push']) {
+  for (const key of ['gate_enabled', 'proposals_enabled', 'slm_enabled', 'slm_catch', 'retro_auto_push']) {
     if (raw[key] === undefined) continue;
     if (typeof raw[key] === 'boolean') cfg[key] = raw[key];
     else warnings.push(`config: ${key} must be a boolean — using default ${CONFIG_DEFAULTS[key]}`);

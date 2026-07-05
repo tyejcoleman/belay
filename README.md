@@ -348,6 +348,9 @@ ever, from a hook. Errors are silent (never-crash rule).
   "allow_overrides": [],         // regexes that force-allow before any ask class
   "slm_enabled": false,          // stage-2 learned adjudicator (ADR-17): opt-in; refines SOFT
                                  // classes only; any failure falls back to stage 1 byte-identically
+  "slm_catch": false,            // catch-mode: also consult the daemon on a stage-1 MISS to gate
+                                 // novel dangerous commands the denylist can't express (add-friction
+                                 // only — any daemon failure passes the command; requires slm_enabled)
   "slm_url": "http://127.0.0.1:8642/adjudicate", // local adjudicator daemon (CGS GATE-ADJUDICATOR-PLAN §3)
   "slm_timeout_ms": 1500,        // hard AbortController cap on the stage-2 call (min 100)
   "slm_min_confidence": 0.9,     // SOFT-class 'allow' accepted only at/above this confidence (0..1)
