@@ -482,9 +482,14 @@ export async function loopDisarm({ goal } = {}) {
   // `belay loop retro <goal>` action, not this hot path.
   let retro = null;
   try {
-    const { buildRetro, writeRetro } = await import('./retro.mjs');
-    retro = buildRetro(goalId);
-    if (retro) writeRetro(retro);
+    const { readConfig } = await import('./util.mjs');
+    const { buildRetro, writeRetro, recordRetro } = await import('./retro.mjs');
+    if (readConfig().cfg.retro_auto_push === true) {
+      retro = (await recordRetro(goalId, { push: true })).retro; // opt-in: also file into keyoku (spawns)
+    } else {
+      retro = buildRetro(goalId); // default: local capture only, no spawn
+      if (retro) writeRetro(retro);
+    }
   } catch {
     /* retro is telemetry — never blocks a disarm */
   }

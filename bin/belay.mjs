@@ -125,6 +125,16 @@ switch (cmd) {
   case 'status':
     (await import('../src/status.mjs')).status(argv);
     break;
+  case 'insights': {
+    const { buildInsights, renderInsights } = await import('../src/insights.mjs');
+    const ins = buildInsights();
+    if (parseFlags(argv).json === true) printJSON(ins);
+    else console.log(renderInsights(ins));
+    break;
+  }
+  case 'selftest':
+    (await import('../src/selftest.mjs')).selftestCommand();
+    break;
   default:
     console.log(`belay — always-on goal loop for Claude Code (reads Keyoku goals + tokenroom budget)
 
@@ -133,6 +143,8 @@ usage:
   belay install [--dry-run] [--config-dir <dir>]   register the Stop + PreToolUse + SessionStart hooks (additive; preserves existing hooks)
   belay uninstall [--config-dir <dir>]             remove only belay's entries
   belay status                                     current focused goal + would-block verdict + counters
+  belay insights [--json]                          how belay is ACTUALLY behaving in production (mines its own decision journal + retros)
+  belay selftest                                   canary: prove the enforcement path blocks/arrests on THIS install + the live harness is firing the hooks
   belay doctor                                     full-stack health + keyoku layout self-check, tokenroom presence, hook registration, config validity
   belay mcp                                        stdio MCP server (belay_status, belay_loop_*, belay_propose) — registered by install
   belay loop create [--goal <slug|id>] [--objective <text> --criteria <json>]

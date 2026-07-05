@@ -560,6 +560,32 @@ tool (the 7-tool surface stays frozen). **Probe-driven e2e** — a `probe-keyoku
 actually RUNS the criterion probe, so `test/probe-e2e.test.mjs` proves the loop flips block→allow
 on a real exit-code change, closing the test-review realism gap.)*
 
+## ADR-22 — observability + assurance: belay watches its own enforcement *(2026-07-04)*
+
+**Decision:** belay gains two self-facing surfaces. **`belay insights`** mines belay's OWN
+decision journal (`~/.belay/decisions.jsonl`) + retros + pending + proposals into a read on how
+the harness is actually behaving — buckets every decision by MEANING (idle no-op / released /
+HELD / GATED), reports the no-op rate (high = correctly not policing normal work), fall-arrest
+acts by class, loop outcomes/thrash, and hook liveness (age of the last journaled decision). To
+make the fall-arrest measurable, the PreToolUse hook now journals its ASK/DENY acts (only when it
+acts — never on the silent-allow hot path, so the 99% case is untouched). **`belay selftest`** is
+the hook-contract canary: it spawns the real Stop + PreToolUse hooks against a throwaway world and
+asserts they block / arrest (incl. behind a shell wrapper) — proving the enforcement CODE PATH is
+intact on THIS install — then reads the real journal to confirm the LIVE harness is actually
+invoking the hooks. `retro_auto_push` (config, default false) optionally files each disarm's retro
+into keyoku's knowledge store, closing the learning loop.
+
+**Why:** belay's enforcement rides Claude Code's hook contract — a surface it does not control,
+and which has broken before (`bypassPermissions` silently auto-yes'd "ask", ADR-13). A harness
+whose enforcement can go silently dead needs to WATCH ITSELF: `selftest` turns "hope the hooks
+fire" into "know they fire," and the liveness read distinguishes "code path intact" from "harness
+actually invoking it." And a 460-entry journal that nothing reads back is wasted signal — the two
+hardest correctness properties (staying a no-op for normal work, never conscripting foreign
+sessions) are only *claims* until the journal shows them holding at scale; `insights` makes them
+observable (measured live: 94% idle, 204 foreign-session stops correctly allowed). Both are pure
+reads over belay's own files (no new keyoku dependency, no new MCP tool — the 7-tool surface stays
+frozen, ADR-9); the gate-journal write is best-effort and never affects a decision (ADR-4).
+
 ## Non-ADR notes
 
 - **Compliance line (from the mission):** official surfaces only — Stop and PreToolUse

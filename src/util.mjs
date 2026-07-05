@@ -145,6 +145,7 @@ export const CONFIG_DEFAULTS = {
   proposal_max_surfaced: 3, // proposals per SessionStart injection
   stale_converged_days: 7, // converged goals older than this become re-assess proposals
   keyoku_call_timeout_ms: 15000, // per keyoku-child JSON-RPC call (ADR-10)
+  retro_auto_push: false, // on disarm, also file the loop retro into keyoku's knowledge store (opt-in; spawns keyoku)
 };
 
 export function toRegExp(pattern) {
@@ -175,7 +176,7 @@ export function validateConfig(raw) {
     if (typeof raw[key] === 'number' && Number.isFinite(raw[key]) && raw[key] >= min) cfg[key] = raw[key];
     else warnings.push(`config: ${key} must be a ${min > 0 ? `number >= ${min}` : 'non-negative number'} — using default ${CONFIG_DEFAULTS[key]}`);
   }
-  for (const key of ['gate_enabled', 'proposals_enabled', 'slm_enabled']) {
+  for (const key of ['gate_enabled', 'proposals_enabled', 'slm_enabled', 'retro_auto_push']) {
     if (raw[key] === undefined) continue;
     if (typeof raw[key] === 'boolean') cfg[key] = raw[key];
     else warnings.push(`config: ${key} must be a boolean — using default ${CONFIG_DEFAULTS[key]}`);

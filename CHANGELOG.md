@@ -10,6 +10,21 @@
 
 ## Unreleased
 
+### System v2 — belay watches its own enforcement (ADR-22)
+
+- **`belay insights`** mines belay's own decision journal + retros + pending into a read on how
+  the harness is actually behaving: decisions bucketed by meaning (idle / released / HELD / GATED),
+  the no-op rate, fall-arrest acts by class, loop outcomes/thrash, and hook liveness. The
+  PreToolUse gate now journals its ask/deny acts (only when it acts — hot path untouched) so the
+  fall-arrest is measurable. Dogfooded on the live journal: 94% correct no-op across 28 sessions.
+- **`belay selftest`** — the hook-contract canary: spawns the real hooks against a throwaway world
+  and proves the enforcement path blocks/arrests on THIS install (incl. behind a shell wrapper),
+  then confirms from the real journal that the live harness is actually firing the hooks. Turns
+  "hope the hooks fire" into "know they fire" — the #1 real-world risk (belay rides a hook contract
+  it doesn't control) now self-checks.
+- **`retro_auto_push`** (config, default false) files each disarm's retro into keyoku's knowledge
+  store, closing the learning loop.
+
 ### Hardening + intelligence pass — audit gaps closed (ADR-18..21)
 
 Driven by a 4-reviewer adversarial audit (hook-path, MCP/loops, effectiveness, test quality).

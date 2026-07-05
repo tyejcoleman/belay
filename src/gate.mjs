@@ -552,6 +552,14 @@ export async function hookPreToolUse() {
         // best-effort — the deny still goes out
       }
     }
+    // Journal the gate ACT (ask/deny) so it is measurable by `belay insights` — only when the
+    // gate actually acts (rare), never on the silent-allow hot path, so this adds nothing to the
+    // 99% case. Best-effort: a journal failure must never affect the decision.
+    try {
+      (await import('./stop.mjs')).journalStop(p, d.hit?.class ?? d.defer?.class ?? 'gate', d.decision, k.goal?.id ?? null);
+    } catch {
+      // observability only
+    }
     process.stdout.write(
       JSON.stringify({
         hookSpecificOutput: {
