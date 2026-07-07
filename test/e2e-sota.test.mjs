@@ -240,7 +240,7 @@ test('T2.2 LOOP E2E: belay_loop_create → stop BLOCKS with the unmet criterion 
   const done = stop(h);
   assert.equal(done.status, 0);
   assert.equal(done.stdout, '', 'converged goal must allow the stop (no block JSON)');
-  assert.match(done.stderr, /converged — nothing to hold/);
+  assert.match(done.stderr, /converged(?: in [^—]+)? — nothing to hold/);
 });
 
 test('T2.2 negative: referencing a suggest-autonomy goal without confirm_autonomous is refused; goals.json byte-identical', { skip: SKIP('agents A+B (mcp + loops)', MCP_READY, LOOPS_READY) }, async () => {

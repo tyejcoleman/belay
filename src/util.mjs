@@ -103,6 +103,36 @@ export function fmtClock(sec) {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
+/** Compact human-readable duration ("45s", "8m 3s", "3h 42m", "2d 5h") for TEXT only (never
+ *  a decision input) — e.g. belay's "total loop duration" reporting on a converged/exhausted
+ *  Stop note. Shows the top TWO units, largest first, positionally contiguous (so an exact
+ *  hour is "1h", not "1h 0m"; a value with a zero MIDDLE unit drops only the trailing zero of
+ *  the pair shown, e.g. 2d + 0h + 10m → "2d", not "2d 0h" or "2d 10m" — kept simple/predictable
+ *  rather than hunting further down the tower for a second nonzero unit).
+ *  Never throws: a non-finite / negative input returns `null` so the caller can omit the
+ *  clause cleanly rather than print a bogus figure (never-crash, ADR-4 spirit). */
+export function fmtDuration(sec) {
+  if (typeof sec !== 'number' || !Number.isFinite(sec) || sec < 0) return null;
+  const total = Math.round(sec);
+  if (total === 0) return '0s';
+  const d = Math.floor(total / 86400);
+  const h = Math.floor((total % 86400) / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const units = [
+    [d, 'd'],
+    [h, 'h'],
+    [m, 'm'],
+    [s, 's'],
+  ];
+  const start = units.findIndex(([v]) => v > 0);
+  return units
+    .slice(start, start + 2)
+    .filter(([v], i) => v > 0 || i === 0)
+    .map(([v, u]) => `${v}${u}`)
+    .join(' ');
+}
+
 export async function readStdin() {
   let raw = '';
   try {

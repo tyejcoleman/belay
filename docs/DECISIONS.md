@@ -939,6 +939,63 @@ unprovable-target refusals, the fail-safe mixed-mutation/chained-command cases, 
 `gate_mode:'defer'` interaction) and `test/loops.test.mjs` (2 new tests: `--autonomy` stored vs
 omitted, invalid value refused pre-spawn). 269 prior + 5 + 2 = 276 total, `# fail 0`.
 
+## ADR-29 — total loop duration reporting on the terminal Stop notes *(2026-07-07)*
+
+**Decision:** The five ALLOW branches in `decideStop` (`src/stop.mjs`) that end a goal's loop —
+`converged`, `iterations-exhausted`, `continuations-exhausted`, `thrash-exhausted`, and
+`budget-floor` — now append the goal's TOTAL elapsed lifetime to their existing `note` string, via
+a small local helper `loopDuration(g, nowSec)`. The start anchor is `goal.createdAt` — keyoku's own
+field, already present on `k.goal` (it is the raw `goals.json` row `readKeyoku` returns unmodified;
+NO change to `keyoku.mjs`'s field surface was needed). The end anchor is `goal.convergedAt` when
+the goal has one (so a converged goal's reported duration is FIXED at the moment it converged, not
+still growing on a later stray re-stop) else the live `nowSec` param `decideStop` already threads
+through. Format: a new exported `fmtDuration(seconds)` in `util.mjs`, next to `fmtClock` — top TWO
+units, largest first, positionally contiguous (`"3h 42m"`, `"8m 3s"`, `"45s"`, `"1h"` at an exact
+hour — never a trailing `"0m"`/`"0h"`/`"0s"`). Converged reads `"converged in 3h 42m — nothing to
+hold"`; the four exhaustion notes get a trailing `" (loop ran 3h 42m)"`. Any missing or
+unparseable `createdAt`/`convergedAt` → `loopDuration`/`fmtDuration` return `null` → the clause is
+omitted CLEANLY, note text otherwise UNCHANGED (never a throw, never a bogus figure — ADR-4).
+
+**Why:** the user wants to know, at the moment a loop ends, how long the whole thing ran — the
+note is the only place that observation reaches a human (stderr, never harness-visible context per
+ADR-7). `createdAt` is the goal's WHOLE-PROCESS lifetime (spans every session that ever drove it),
+which is what "the entire process took" means, as opposed to a per-session continuation count.
+
+**Scope — TEXT ONLY, no decision changed (ADR-6):** every touched branch's `action`, `kind`,
+`save`, and `entry` are computed exactly as before; `loopDuration` is invoked only AFTER the
+decision is already made, purely to build the trailing note string. The five branches are the
+ONLY loop-ending ALLOWs (`decideStop`'s docstring names them the terminal outcomes); every other
+allow (paused, awaiting-async, loop-paused, nothing-unmet, scope-mismatch, …) is a non-terminal or
+non-loop-owning branch and is untouched, and every `block` path is untouched.
+
+**Never-crash (ADR-4):** `loopDuration` never throws — `toEpochSec` (existing, `util.mjs`) already
+degrades any non-numeric/unparseable timestamp to `null`, and `fmtDuration` degrades any
+non-finite/negative seconds value to `null`; both null cases short-circuit the note's ternary to
+the ORIGINAL (pre-ADR-29) wording, byte-identical. Proof in `test/stop.test.mjs`: a converged goal
+with fixed `createdAt`/`convergedAt` 3h42m apart asserts the exact duration clause (anchored on
+`convergedAt`, not live time — deterministic, never flaky); a converged goal with `createdAt`
+missing, and separately with `createdAt` an unparseable string, both assert the ORIGINAL note
+verbatim with no `" in …"` clause and no crash (`status === 0`); an `iterations-exhausted` case
+with a known `createdAt` asserts the `"(loop ran 2h)"` suffix (a round 2h offset, so no
+sub-second/spawn-timing flakiness); and a standalone `fmtDuration` table covers the s/m/h/d unit
+boundaries (0, 1, 59, 60, 61, 3599, 3600, 3601, 86399, 86400, and a 2d5h case) plus
+negative/NaN/Infinity/non-number/null/undefined → `null`.
+
+**Existing-test fallout:** four pre-existing tests asserted the converged note as the LITERAL
+contiguous string `"converged — nothing to hold"` (`test/stop.test.mjs`, `test/autonomous-e2e.test.mjs`,
+`test/e2e-sota.test.mjs`, `test/pending.test.mjs` ×2) — their fixture goals carry the default
+`goal()` helper's `createdAt` (1h before "now"), so the new duration clause now lands between
+"converged" and the em-dash. Each was widened to `/converged(?: in [^—]+)? — nothing to hold/`
+(tolerates the clause whether or not it renders — never asserts the literal number, avoiding any
+timing coupling), byte-identical for a goal with no `createdAt` and now also correct for the
+common case where one is present.
+
+**Files:** `src/util.mjs` (`fmtDuration`, exported, next to `fmtClock`), `src/stop.mjs`
+(`loopDuration` helper + the five branch call sites — `decideStop` otherwise unchanged). Proof:
+`test/stop.test.mjs` (4 new tests: known-duration converged, missing/unparseable-createdAt
+no-crash, iterations-exhausted duration, `fmtDuration` unit boundaries) plus the 4 pre-existing
+test files above widened to tolerate the new clause. 276 prior + 4 = 280 total, `# fail 0`.
+
 ## Non-ADR notes
 
 - **Compliance line (from the mission):** official surfaces only — Stop and PreToolUse

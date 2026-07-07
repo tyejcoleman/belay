@@ -57,7 +57,7 @@ test('AUTONOMOUS LOOP — the goal drives the agent to keep working, then stops 
   const done = stop(h);
   assert.equal(done.status, 0);
   assert.equal(done.stdout, '', 'converged goal must ALLOW the stop (no block JSON)');
-  assert.match(done.stderr, /goal 'ship-feature' converged — nothing to hold/);
+  assert.match(done.stderr, /goal 'ship-feature' converged(?: in [^—]+)? — nothing to hold/);
 });
 
 test('BOUNDED — a non-converging autonomous goal is released after max_continuations (no infinite loop)', () => {

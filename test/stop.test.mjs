@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homes, run, goal, focusFor, obs, writeKeyoku, writeTokenroom, writeProfiles, stopPayload, nowSec, iso } from './helpers.mjs';
+import { fmtDuration } from '../src/util.mjs';
 
 // T1: every Stop-hook decision branch, spawning the real bin against synthetic
 // KEYOKU_HOME / TOKENROOM_DIR / BELAY_DIR fixtures.
@@ -133,7 +134,7 @@ test('converged → allow with stderr one-liner; blocked/abandoned → silent al
   writeKeyoku(conv, { goals: [goal({ status: 'converged' })], focus: focusFor(), obsLines: [obs({ unmet: [] })] });
   const r = stop(conv);
   assert.equal(r.stdout, '');
-  assert.match(r.stderr, /goal 'ship-widget' converged — nothing to hold/);
+  assert.match(r.stderr, /goal 'ship-widget' converged(?: in [^—]+)? — nothing to hold/);
 
   for (const status of ['blocked', 'abandoned']) {
     const h = homes();
@@ -536,4 +537,73 @@ test('adaptive escalation: a stalled loop gets an escalation block then RELEASES
   assert.match(r5.stderr, /stalled: same unmet set for 5 assessments/);
   const st = JSON.parse(readFileSync(join(h.belay, 'state.json'), 'utf8'));
   assert.ok(st.sessions.s1.continuations < 25, `should release under the cap, got ${st.sessions.s1.continuations}`);
+});
+
+// ── total loop duration reporting (terminal Stop notes only — never a decision input) ──────
+
+test('converged with a known createdAt/convergedAt → note reports the total loop duration', () => {
+  const h = homes();
+  const created = nowSec() - (3 * 3600 + 42 * 60); // exactly 3h42m before convergedAt
+  const convergedAt = nowSec();
+  writeKeyoku(h, {
+    goals: [goal({ status: 'converged', createdAt: iso(created), convergedAt: iso(convergedAt) })],
+    focus: focusFor(),
+    obsLines: [obs({ unmet: [] })],
+  });
+  const r = stop(h);
+  assert.equal(r.stdout, '');
+  // anchored on convergedAt (fixed), not live "now" — deterministic, never flaky
+  assert.match(r.stderr, /goal 'ship-widget' converged in 3h 42m — nothing to hold/);
+});
+
+test('converged with missing or unparseable createdAt → note emitted WITHOUT a duration clause (never crash)', () => {
+  const missing = homes();
+  const gMissing = goal({ status: 'converged' });
+  delete gMissing.createdAt;
+  writeKeyoku(missing, { goals: [gMissing], focus: focusFor(), obsLines: [obs({ unmet: [] })] });
+  const r1 = stop(missing);
+  assert.equal(r1.status, 0);
+  assert.equal(r1.stdout, '');
+  assert.match(r1.stderr, /goal 'ship-widget' converged — nothing to hold\n/); // no " in ..." clause, no trailing artifact
+
+  const bad = homes();
+  writeKeyoku(bad, { goals: [goal({ status: 'converged', createdAt: 'not-a-date' })], focus: focusFor(), obsLines: [obs({ unmet: [] })] });
+  const r2 = stop(bad);
+  assert.equal(r2.status, 0);
+  assert.equal(r2.stdout, '');
+  assert.match(r2.stderr, /goal 'ship-widget' converged — nothing to hold\n/);
+});
+
+test('iterations-exhausted note reports the loop duration when createdAt is known', () => {
+  const h = homes();
+  writeKeyoku(h, { goals: [goal({ usedIterations: 50, maxIterations: 50, createdAt: iso(nowSec() - 7200) })], focus: focusFor(), obsLines: [obs()] });
+  writeTokenroom(h);
+  const r = stop(h);
+  assert.equal(r.stdout, '');
+  assert.match(r.stderr, /keyoku iteration budget exhausted \(50\/50\) — allowing stop \(loop ran 2h\)/);
+});
+
+test('fmtDuration: unit boundaries (s/m/h/d) and never-crash on bad input', () => {
+  assert.equal(fmtDuration(0), '0s');
+  assert.equal(fmtDuration(1), '1s');
+  assert.equal(fmtDuration(45), '45s');
+  assert.equal(fmtDuration(59), '59s');
+  assert.equal(fmtDuration(60), '1m'); // minute boundary — no trailing "0s"
+  assert.equal(fmtDuration(61), '1m 1s');
+  assert.equal(fmtDuration(483), '8m 3s'); // 8m 3s
+  assert.equal(fmtDuration(3599), '59m 59s');
+  assert.equal(fmtDuration(3600), '1h'); // hour boundary — no trailing "0m"
+  assert.equal(fmtDuration(3601), '1h'); // sub-minute residue past the hour is dropped (top 2 units)
+  assert.equal(fmtDuration(13320), '3h 42m');
+  assert.equal(fmtDuration(86399), '23h 59m'); // just under a day
+  assert.equal(fmtDuration(86400), '1d'); // day boundary — no trailing "0h"
+  assert.equal(fmtDuration(190800), '2d 5h'); // 2d 5h (0m residue dropped, top 2 units)
+
+  // never-crash: bad input → null, never a throw or a bogus figure
+  assert.equal(fmtDuration(-5), null);
+  assert.equal(fmtDuration(NaN), null);
+  assert.equal(fmtDuration(Infinity), null);
+  assert.equal(fmtDuration('45'), null);
+  assert.equal(fmtDuration(null), null);
+  assert.equal(fmtDuration(undefined), null);
 });

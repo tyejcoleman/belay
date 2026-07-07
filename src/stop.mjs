@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { readStdin, readConfig, fmtClock, toEpochSec, sanitizeSlug, capReason, belayDir, ensureDir, readJSON } from './util.mjs';
+import { readStdin, readConfig, fmtClock, fmtDuration, toEpochSec, sanitizeSlug, capReason, belayDir, ensureDir, readJSON } from './util.mjs';
 import { readKeyoku, keyokuHome, tailObservation, goalSlug, unmetDetail } from './keyoku.mjs';
 import { readBudget } from './budget.mjs';
 import { readOwnState, sessionEntry, saveSessionEntry, portfolioEntry, portfolioSteeredAt, savePortfolioEntry } from './state.mjs';
@@ -14,6 +14,21 @@ import { isAwaiting } from './await.mjs';
 // silently: belay must be a no-op for normal interactive use (ADR-4).
 
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
+/** Total loop duration TEXT for a terminal Stop note (converged / *-exhausted / budget-floor):
+ *  the goal's whole-process lifetime, `goal.createdAt` (keyoku's own field — passed through
+ *  `readKeyoku` unmodified, so it's already on `k.goal`) to either `goal.convergedAt` (a
+ *  converged goal — so a later re-stop against a stale note never keeps growing the figure) or
+ *  `nowSec` (still running). Returns `null` on ANY missing/unparseable timestamp so the caller
+ *  omits the clause cleanly — this only ever changes note TEXT, never a block/allow DECISION
+ *  (ADR-6 untouched), and must never throw or invent a figure (ADR-4). */
+function loopDuration(g, nowSec) {
+  const start = toEpochSec(g?.createdAt);
+  if (start == null) return null;
+  const end = g?.convergedAt != null ? toEpochSec(g.convergedAt) : Math.round(nowSec);
+  if (end == null) return null;
+  return fmtDuration(Math.max(0, end - start));
+}
 
 /** The budget clause appended to a block reason. Empty when budget is UNKNOWN
  *  (permissive for stop decisions — never invent a figure). */
@@ -75,7 +90,10 @@ export function decideStop(_p, k, budget, cfg, entry, nowSec = Date.now() / 1000
     return { action: 'allow', kind: 'loop-paused', note: `[belay] loop for goal '${slug}' is paused (belay_loop_resume to re-arm) — allowing stop` };
   }
 
-  if (g.status === 'converged') return { action: 'allow', kind: 'converged', note: `[belay] goal '${slug}' converged — nothing to hold` };
+  if (g.status === 'converged') {
+    const dur = loopDuration(g, nowSec);
+    return { action: 'allow', kind: 'converged', note: `[belay] goal '${slug}' converged${dur ? ` in ${dur}` : ''} — nothing to hold` };
+  }
   if (g.status !== 'active') return { action: 'allow', kind: `goal-${g.status}` }; // blocked / abandoned / anything future
   if (g.autonomy !== 'autonomous') return { action: 'allow', kind: 'not-autonomous' }; // ADR-2
 
@@ -101,15 +119,17 @@ export function decideStop(_p, k, budget, cfg, entry, nowSec = Date.now() / 1000
   const used = num(g.usedIterations);
   const max = num(g.maxIterations);
   if (used != null && max != null && max > 0 && used >= max) {
-    return { action: 'allow', kind: 'iterations-exhausted', note: `[belay] goal '${slug}': keyoku iteration budget exhausted (${used}/${max}) — allowing stop` };
+    const dur = loopDuration(g, nowSec);
+    return { action: 'allow', kind: 'iterations-exhausted', note: `[belay] goal '${slug}': keyoku iteration budget exhausted (${used}/${max}) — allowing stop${dur ? ` (loop ran ${dur})` : ''}` };
   }
 
   // Quota-dead with no fresh alternate profile is the ONE legit stop (descent).
   if (budget.known && budget.left_pct != null && budget.left_pct < cfg.budget_floor_pct && !budget.alt) {
+    const dur = loopDuration(g, nowSec);
     return {
       action: 'allow',
       kind: 'budget-floor',
-      note: `[belay] goal '${slug}' unconverged, but the 5h window is below the ${cfg.budget_floor_pct}% floor (${Math.round(budget.left_pct)}% left${budget.resets_at ? `, resets ${fmtClock(budget.resets_at)}` : ''}) with no fresh alternate profile — allowing stop (descent)`,
+      note: `[belay] goal '${slug}' unconverged, but the 5h window is below the ${cfg.budget_floor_pct}% floor (${Math.round(budget.left_pct)}% left${budget.resets_at ? `, resets ${fmtClock(budget.resets_at)}` : ''}) with no fresh alternate profile — allowing stop (descent)${dur ? ` (loop ran ${dur})` : ''}`,
     };
   }
 
@@ -171,10 +191,11 @@ export function decideStop(_p, k, budget, cfg, entry, nowSec = Date.now() / 1000
 
   // Own continuation budget on top of the harness guard: per (session, goal).
   if (entry.continuations >= cfg.max_continuations) {
+    const dur = loopDuration(g, nowSec);
     return {
       action: 'allow',
       kind: 'continuations-exhausted',
-      note: `[belay] continuation budget exhausted for goal '${slug}' (${entry.continuations}/${cfg.max_continuations} this session) — allowing stop`,
+      note: `[belay] continuation budget exhausted for goal '${slug}' (${entry.continuations}/${cfg.max_continuations} this session) — allowing stop${dur ? ` (loop ran ${dur})` : ''}`,
     };
   }
 
@@ -222,12 +243,13 @@ export function decideStop(_p, k, budget, cfg, entry, nowSec = Date.now() / 1000
   // allow, so the ADR-6 block bound is unaffected; sameUnmetCount is persisted so it stays
   // released (monotonic) until real progress resets the streak.
   if (sameUnmetCount > effectiveThrashRelease) {
+    const dur = loopDuration(g, nowSec);
     return {
       action: 'allow',
       kind: 'thrash-exhausted',
       save: true,
       entry: { ...entry, lastUnmetHash: unmetHash, sameUnmetCount },
-      note: `[belay] goal '${slug}' stalled: same unmet set for ${sameUnmetCount} assessments, no progress; releasing the hold (mark the goal blocked/abandoned in keyoku or escalate to a human)`,
+      note: `[belay] goal '${slug}' stalled: same unmet set for ${sameUnmetCount} assessments, no progress; releasing the hold (mark the goal blocked/abandoned in keyoku or escalate to a human)${dur ? ` (loop ran ${dur})` : ''}`,
     };
   }
 

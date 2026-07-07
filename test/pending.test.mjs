@@ -101,13 +101,13 @@ test('converged stop with pending entries → allow + stderr reminder; empty que
   const r = run(h, ['hook', 'stop'], stopPayload());
   assert.equal(r.status, 0);
   assert.equal(r.stdout, ''); // the stop is ALLOWED — the queue never blocks it (ADR-12 mirror)
-  assert.match(r.stderr, /converged — nothing to hold/);
+  assert.match(r.stderr, /converged(?: in [^—]+)? — nothing to hold/);
   assert.match(r.stderr, /1 deferred action\(s\) await approval — run 'belay pending'/);
 
   const quiet = homes();
   writeKeyoku(quiet, { goals: [goal({ status: 'converged' })], focus: focusFor(), obsLines: [obs({ unmet: [] })] });
   const r2 = run(quiet, ['hook', 'stop'], stopPayload());
-  assert.match(r2.stderr, /converged — nothing to hold/);
+  assert.match(r2.stderr, /converged(?: in [^—]+)? — nothing to hold/);
   assert.doesNotMatch(r2.stderr, /deferred action/);
 });
 
