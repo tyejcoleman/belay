@@ -682,6 +682,92 @@ makes the branch inert — proved by the deep-equal default-vs-explicit-false te
 network — a pure file read on belay's own tiny state file. All 251 prior tests stay green;
 `test/await-async.test.mjs` adds 6 (marker→allow, byte-identity, session-scope, module + CLI).
 
+## ADR-25 — per-session goal PORTFOLIO: belay steers a session's whole owned set, no eviction (B3) *(2026-07-07)*
+
+**Decision (belay-only):** The goal a Stop steers is now derived PER SESSION from belay's OWN
+`~/.belay/loops.json`, not from keyoku's GLOBAL `focus.json` singleton. A Claude Code session
+OWNS the armed, non-paused, `session_id`-pinned loops whose keyoku goal row is `active`
+(`keyoku.mjs sessionOwnedGoalIds`). belay steers that session's ENTIRE owned set to
+convergence: `hookStop` gathers the owned units (`stop.mjs ownedActiveUnits`) and, when the
+session owns **≥2**, runs the portfolio orchestrator `decidePortfolio`; a session owning **0 or
+1** falls through to the pre-B3 single-goal path, byte-identical. `readKeyoku` gained the same
+per-session resolution for the gate/status/briefing surfaces (it resolves the most-recently-armed
+owned goal; the Stop hook drives the full set). Per-(session, goal) continuation counters live in
+an ADDITIVE `state.json` `portfolios[sessionId][goalId]` map; the flat `sessions` slot (one
+goalId/session) is left ENTIRELY untouched, so single-goal state is byte-identical.
+
+**Why (B3):** keyoku's focus is a global singleton (`~/.keyoku/focus.json`, last-writer-wins;
+verified against keyoku **v2.18.0** `store.ts:163-188` / `engine.ts:313-329`). belay used to hold
+"the focused goal," so when session B armed a loop (`goal_focus` overwrites the singleton), session
+A's focus was clobbered and A's stop scope-mismatched → A's loop was EVICTED. Two autonomous
+sessions could not each hold their own loop; they ping-ponged the one focus. Deriving the steered
+goal from belay's own per-loop `session_id` removes the dependence on the singleton entirely: a
+global focus flip by another session (or arming a sibling in the same session) touches nothing in
+this session's owned set. Generalized, one session drives a PORTFOLIO of goals concurrently while
+every other session's goals are untouched.
+
+**Rotation policy (round-robin, stateless):** each stop `decidePortfolio` runs the SAME per-goal
+`decideStop` over every owned unit. If none would block → ALLOW (`portfolio-idle`: all owned goals
+converged/exhausted/paused/nothing-unmet). Otherwise it steers exactly ONE blocker — the one belay
+steered **least recently** (oldest `portfolios[…].updated_at`, i.e. `steeredAt`; never-steered = 0
+= first; ties by goalId) — BLOCKS on it (the reason names the goal + its portfolio position), and
+persists ONLY that goal's entry (stamping `updated_at = now`, sending it to the back of the line).
+Successive stops therefore fan across the whole owned set so every goal gets driven. The key is
+durable and file-derived (no separate cursor to persist), so it survives crashes/compaction like
+the rest of belay's state. `awaiting` (B7) is session-level: when set, every unit short-circuits to
+an allow → no blockers → the portfolio allows, consistent with the single-goal path.
+
+**Termination / safety argument (ADR-6 preserved, GENERALIZED):** each owned `(session, goal)`
+keeps its OWN monotonic, durable continuation counter, capped at `max_continuations` by the
+unchanged `decideStop` — exactly as a lone goal is. Rotation only chooses WHICH counter advances on
+a given stop; it never resets a cap, skips one, or refunds a spend. Steering a blocker ALWAYS
+advances that goal monotonically toward its own release (an unmet block ⟶ +1 continuation; a
+one-shot stale / unmet-unknown block ⟶ spends its guard), so no goal can be steered forever. With
+`N` (finite) owned goals each bounded by ≈`max_continuations` blocks, the portfolio emits at most
+≈`N·(max_continuations+1)` blocks in total, then ALLOWS — provably terminating. Even an adversarial
+rotation that fixated on one goal would drain THAT goal to its cap (it then stops blocking), forcing
+the next — so the whole set still drains. The total block count is only ever the SUM of the
+unchanged per-goal bounds; nothing here raises a single goal's bound. `decidePortfolio` is an
+orchestrator over `decideStop`, which is byte-for-byte unchanged, so the block/allow caps on the
+individual axis are untouched. The **PreToolUse fall-arrest (ADR-6's other half) is untouched** —
+this changes only WHICH goal a session steers, never the arrest's block/allow behavior.
+
+**Backward-compat (constraint 1):** B3 activates ONLY for loop entries carrying
+`session_id === payload.session_id`. Existing fixtures/`writeLoops` seed entries WITHOUT a
+session_id, and a `scope:'global'` loop has `session_id: null` — both are excluded from the owned
+set, so they keep flowing through the global focus.json + `scopeMatch` path unchanged. A session
+owning exactly one goal uses the flat `sessions` slot and emits no portfolio wording. All 257 prior
+tests stay green. **Never-crash (ADR-4):** `ownedActiveUnits` and `sessionOwnedGoalIds` are fully
+guarded (→ `[]` on any read/parse error), so a corrupt loops.json/goals.json degrades to the single
+focus path; no spawn, no network — small extra file reads on belay's own tiny state.
+
+**KNOWN RISK — keyoku's live capture misattributes under concurrent focus (NOT fixed here, by
+design):** belay's *steering* no longer depends on `focus.json`, but keyoku's OWN live
+action-capture (`engine.ts:1114 autoRecordToFocusGoal`) still attributes every captured action to
+the ONE global `focus.json` goal, gated only by session/cwd accept-reject — it has NO per-session
+focus map (keyoku v2.18.0). So when a session drives a portfolio (or two sessions focus different
+goals), keyoku credits actions to whichever goal was focused LAST globally (shared cwd →
+misattribution; disjoint cwd / explicit sessionIds → silent capture LOSS for all but the last
+focus). belay's `loop create` still calls `goal_focus` (kept for single-goal byte-identity and to
+keep live capture working for the focused goal), so within a portfolio only the last-armed goal
+gets live keyoku capture; siblings rely on explicit `goal_record`. This degrades keyoku's
+TRACE/LEARNING fidelity only — it does NOT affect belay's steering correctness, the no-eviction
+property, or termination. A real fix requires a keyoku change (a per-session focus map, e.g.
+`focus.json` keyed by `sessionId` or a `focuses/` dir, with `autoRecordToFocusGoal` selecting by
+`event.sessionId`), preserving the single-focus default for the no-session case. That is a genuine
+keyoku-side change to a PUBLISHED package and is deliberately OUT OF SCOPE here (belay-first
+mandate); it is left tracked, not implemented, and NOT published.
+
+**Files:** `src/keyoku.mjs` (`sessionOwnedGoalIds` + `readKeyoku` per-session resolution),
+`src/stop.mjs` (`ownedActiveUnits`, `decidePortfolio`, `hookStop` branch; `decideStop` unchanged),
+`src/state.mjs` (`portfolioEntry`/`portfolioSteeredAt`/`savePortfolioEntry`/`resolveEntry`/
+`sumContinuations`; flat `sessions` fns untouched), `src/loops.mjs` (arm refunds the per-goal
+budget too), `src/compose.mjs` + `src/status.mjs` (portfolio-aware counters), `src/retro.mjs`
+(portfolio-aware tally). Proof in `test/portfolio.test.mjs` (7 tests): no-eviction cross-session,
+round-robin drives both, allow-only-when-all-done, cross-session non-interference on arm,
+termination bound (exactly `N·max_continuations` blocks then release), single-goal backward-compat
+(flat slot, no portfolio wording), corrupt-loops never-crash. 257 prior + 7 = 264 green.
+
 ## Non-ADR notes
 
 - **Compliance line (from the mission):** official surfaces only — Stop and PreToolUse

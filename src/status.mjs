@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { readJSON, readConfig, fmtClock, belayDir, sanitizeText } from './util.mjs';
 import { keyokuHome, readKeyoku, goalSlug, unmetDetail } from './keyoku.mjs';
 import { readBudget } from './budget.mjs';
-import { readOwnState, sessionEntry } from './state.mjs';
+import { readOwnState, resolveEntry } from './state.mjs';
 import { decideStop } from './stop.mjs';
 import { readLoops } from './loops.mjs';
 import { pendingSummary } from './pending.mjs';
@@ -52,7 +52,7 @@ export function status() {
   }
 
   const own = readOwnState();
-  const entry = sessionEntry(own, payload.session_id, k.goal?.id ?? null);
+  const entry = resolveEntry(own, payload.session_id, k.goal?.id ?? null); // B3/ADR-25: portfolio counters when owned, else flat
   const d = decideStop(payload, k, budget, cfg, entry);
 
   if (k.goal) {

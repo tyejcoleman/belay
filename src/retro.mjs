@@ -29,11 +29,17 @@ export function buildRetro(goalId, { nowIso } = {}) {
   let continuations = 0;
   let maxSameUnmet = 0;
   let staleBlocked = false;
-  for (const e of Object.values(own.sessions)) {
-    if (!e || typeof e !== 'object' || e.goalId !== goalId) continue;
+  const tally = (e) => {
+    if (!e || typeof e !== 'object' || e.goalId !== goalId) return;
     if (num(e.continuations) != null) continuations += e.continuations;
     if (num(e.sameUnmetCount) != null) maxSameUnmet = Math.max(maxSameUnmet, e.sameUnmetCount);
     if (e.staleBlocked === true) staleBlocked = true;
+  };
+  for (const e of Object.values(own.sessions)) tally(e);
+  // B3/ADR-25: also fold in every session's PORTFOLIO copy of this goal (portfolio entries
+  // store goalId, so the goalId guard in tally() scopes them correctly).
+  for (const bucket of Object.values(own.portfolios ?? {})) {
+    if (bucket && typeof bucket === 'object') for (const e of Object.values(bucket)) tally(e);
   }
 
   // decision-journal tally for this goal (best-effort; the journal is observability-only)

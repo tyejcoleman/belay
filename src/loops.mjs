@@ -299,10 +299,24 @@ export async function loopCreate(args = {}) {
       if (sessionId) {
         own.sessions[sessionId] = { goalId: row.id, continuations: 0, staleBlocked: false, updated_at: nowSec };
         dirty = true;
+        // B3/ADR-25: if this session drives a portfolio, refund THIS goal's per-goal counter
+        // too (re-arm = fresh budget), leaving sibling goals' counters intact — the same
+        // "focused goal changed → fresh budget" semantics, per (session, goal).
+        if (own.portfolios?.[sessionId] && Object.prototype.hasOwnProperty.call(own.portfolios[sessionId], row.id)) {
+          delete own.portfolios[sessionId][row.id];
+          dirty = true;
+        }
       } else {
         for (const [sid, e] of Object.entries(own.sessions)) {
           if (e && typeof e === 'object' && e.goalId === row.id) {
             own.sessions[sid] = { ...e, continuations: 0, staleBlocked: false };
+            dirty = true;
+          }
+        }
+        // global arm refunds every portfolio's copy of this goal (all sessions driving it)
+        for (const bucket of Object.values(own.portfolios ?? {})) {
+          if (bucket && typeof bucket === 'object' && Object.prototype.hasOwnProperty.call(bucket, row.id)) {
+            delete bucket[row.id];
             dirty = true;
           }
         }

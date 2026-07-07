@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { readJSON, readConfig, toEpochSec, sanitizeText, sanitizeSlug, capReason, belayDir, tokenroomDir } from './util.mjs';
 import { keyokuHome, readKeyoku, goalSlug, unmetDetail } from './keyoku.mjs';
 import { readBudget } from './budget.mjs';
-import { readOwnState, sessionEntry } from './state.mjs';
+import { readOwnState, resolveEntry, sumContinuations } from './state.mjs';
 import { readLoops } from './loops.mjs';
 import { pendingSummary } from './pending.mjs';
 import { decideStop, budgetLine } from './stop.mjs';
@@ -169,7 +169,9 @@ export function buildStatus({ session_id, cwd } = {}) {
   // file-sourced (opposite verdicts from the real driving session's hook were reproduced).
   // So: figures are withheld as `unattributed`, and the verdict is explicitly marked as
   // zero-history — the same posture the budget block already takes (ADR-24 mirror).
-  const entry = sessionEntry(own, sessionId ?? 'status-probe', k.goal?.id ?? null);
+  // B3/ADR-25: prefer this (session, goal)'s PORTFOLIO counters when it owns a portfolio;
+  // falls back to the flat entry for a single-goal session (byte-identical).
+  const entry = resolveEntry(own, sessionId ?? 'status-probe', k.goal?.id ?? null);
   // The SAME pure function the Stop hook runs — read-only here: the mutated counter
   // entry decideStop hands back is deliberately NOT persisted (like status.mjs).
   const d = decideStop({ session_id: sessionId ?? 'status-probe', cwd: effCwd, stop_hook_active: false }, k, budget, cfg, entry);
@@ -271,7 +273,7 @@ export function buildLoopBriefing({ session_id, cwd } = {}) {
   else if (unmet == null) parts.push('no readable assessment yet');
   const cons = Array.isArray(g.constraints) ? g.constraints.filter((c) => typeof c === 'string' && c).slice(0, 5).map((c) => sanitizeText(c, 120)) : [];
   if (cons.length) parts.push(`constraints: ${cons.join('; ')}`);
-  const entry = sessionEntry(readOwnState(), session_id ?? 'status-probe', g.id);
+  const entry = resolveEntry(readOwnState(), session_id ?? 'status-probe', g.id);
   parts.push(`continuations ${entry.continuations}/${cfg.max_continuations}`);
   const bl = budgetLine(readBudget(session_id, Date.now() / 1000), cfg).trim();
   if (bl) parts.push(bl.replace(/\.$/, ''));
@@ -317,10 +319,8 @@ export function buildLoopList() {
     const staleConverged = g.status === 'converged' && (assessedAt == null || nowSec - assessedAt > cfg.stale_converged_days * 86400);
     if (!focused && !armable && !le && !staleConverged) continue;
 
-    let continuations = 0;
-    for (const e of Object.values(own.sessions)) {
-      if (e && typeof e === 'object' && e.goalId === g.id && num(e.continuations) != null) continuations += e.continuations;
-    }
+    // Additive across the flat sessions map AND every session's portfolio bucket (B3/ADR-25).
+    const continuations = sumContinuations(own, g.id);
 
     const row = {
       goalId: g.id,

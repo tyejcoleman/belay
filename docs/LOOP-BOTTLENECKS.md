@@ -23,10 +23,23 @@ fix/status. Goal `belay-handles-any-loop` drives these to resolution using the l
   `goal_create` + abandon; no in-place edit. Makes iterating on goal granularity heavy and loses the
   action trace. Candidate: a keyoku `goal_recriteria` op, or belay guidance to size criteria per-session.
 
-- [B3] **One focused goal at a time** — STATUS: TRACKED
-  keyoku focus is a global singleton; belay holds only the focused goal, so two *different* loops
-  can't run in parallel across terminals (arming a second re-points focus, releasing the first).
-  Candidate: multi-focus keyed by session_id, or a belay-side session→goal map.
+- [B3] **One focused goal at a time** — STATUS: **DONE** (ADR-25)
+  keyoku focus is a global singleton; belay held only the focused goal, so two *different* loops
+  couldn't run in parallel across terminals (arming a second re-points focus, releasing the first).
+  **Fix (ADR-25, belay-only):** the goal a Stop steers is now derived PER SESSION from belay's own
+  `loops.json` (the armed, non-paused, `session_id`-pinned loops whose goal is active) instead of
+  keyoku's `focus.json` singleton — so a global focus flip by another session can never evict this
+  session's loop. Generalized to a per-session PORTFOLIO: `decidePortfolio` steers a session's WHOLE
+  owned set (round-robin, one goal per stop; allow only when all converge), each goal independently
+  capped so ADR-6 termination holds (`≈N·max_continuations` bound). Per-(session, goal) counters in a
+  new additive `state.json` `portfolios` map; single-goal state byte-identical. Proof in
+  `test/portfolio.test.mjs` (264 total green).
+  **Left as a KNOWN RISK (tracked, not done):** keyoku's OWN live capture (`autoRecordToFocusGoal`)
+  still misattributes/loses actions under concurrent multi-goal focus because keyoku's `focus.json`
+  is a singleton (v2.18.0, no per-session focus map). This degrades keyoku's trace/learning fidelity
+  only — NOT belay's steering, the no-eviction property, or termination. A real fix needs a MINIMAL
+  keyoku change (per-session focus map, single-focus default preserved); deliberately out of scope
+  under the belay-first mandate (published package — not touched, not published).
 
 - [B4] **Session-scoping friction** — STATUS: TRACKED
   belay loops are session-scoped and require the arming session's `session_id`

@@ -1,10 +1,10 @@
-import { appendFileSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { readStdin, readConfig, fmtClock, toEpochSec, sanitizeSlug, capReason, belayDir, ensureDir } from './util.mjs';
-import { readKeyoku, goalSlug, unmetDetail } from './keyoku.mjs';
+import { readStdin, readConfig, fmtClock, toEpochSec, sanitizeSlug, capReason, belayDir, ensureDir, readJSON } from './util.mjs';
+import { readKeyoku, keyokuHome, tailObservation, goalSlug, unmetDetail } from './keyoku.mjs';
 import { readBudget } from './budget.mjs';
-import { readOwnState, sessionEntry, saveSessionEntry } from './state.mjs';
+import { readOwnState, sessionEntry, saveSessionEntry, portfolioEntry, portfolioSteeredAt, savePortfolioEntry } from './state.mjs';
 import { readLoops } from './loops.mjs';
 import { isAwaiting } from './await.mjs';
 
@@ -262,6 +262,119 @@ export function decideStop(_p, k, budget, cfg, entry, nowSec = Date.now() / 1000
   };
 }
 
+// ── B3/ADR-25: per-session goal PORTFOLIO ────────────────────────────────────────────────
+// A Claude Code session can OWN many keyoku goals (the armed, non-paused, session-pinned
+// loops.json entries whose goal row is active). belay steers the WHOLE owned set to
+// convergence: each stop it drives ONE owned goal (rotation) and only ALLOWS the stop once
+// EVERY owned goal is converged / exhausted / not-holdable. Other sessions' loops are never
+// read, so arming a goal for THIS session can never evict another session's goal (nor a
+// sibling goal within this session) — the no-eviction property, generalized to a portfolio.
+
+/**
+ * The active loops THIS session owns, each as a synthetic readKeyoku-shaped `k` snapshot
+ * ({home, present, paused, focus, matched, goal, obs}) plus its loop entry. Only
+ * `session_id === p.session_id`, armed, non-paused entries whose goal row is `active`
+ * qualify (identical predicate to keyoku.sessionOwnedGoalIds). [] when keyoku is absent or
+ * globally paused, goals are unreadable, session_id is missing, or the session owns none —
+ * in every one of those cases the caller falls back to the single-goal path. Never throws.
+ * @returns {Array<{ goalId: string, k: object, loopEntry: object }>}
+ */
+export function ownedActiveUnits(p, loops) {
+  try {
+    const sessionId = typeof p?.session_id === 'string' && p.session_id ? p.session_id : null;
+    if (!sessionId || !loops || typeof loops !== 'object') return [];
+    const home = keyokuHome();
+    if (!existsSync(home) || existsSync(join(home, 'paused'))) return []; // keyoku absent / globally paused → single path allows
+    const goals = readJSON(join(home, 'goals.json'));
+    if (!Array.isArray(goals)) return [];
+    const units = [];
+    for (const [goalId, e] of Object.entries(loops)) {
+      if (!e || typeof e !== 'object' || e.session_id !== sessionId || e.armed !== true || e.paused === true) continue;
+      const goal = goals.find((g) => g && typeof g === 'object' && g.id === goalId && typeof g.status === 'string');
+      if (!goal || goal.status !== 'active') continue;
+      const obs = tailObservation(join(home, 'observations', `${goalId}.jsonl`));
+      units.push({
+        goalId,
+        loopEntry: e,
+        k: { home, present: true, paused: false, focus: { goalId, goalSlug: undefined, sessionId }, matched: true, goal, obs },
+      });
+    }
+    // stable membership order (armed_at asc, then goalId); the STEER order is by steeredAt in decidePortfolio.
+    units.sort((a, b) => ((num(a.loopEntry.armed_at) ?? 0) - (num(b.loopEntry.armed_at) ?? 0)) || (a.goalId < b.goalId ? -1 : a.goalId > b.goalId ? 1 : 0));
+    return units;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The portfolio decision — PURE. Runs the SAME per-goal `decideStop` over every owned unit,
+ * then combines: if NO owned goal would block, ALLOW (all converged/exhausted/paused/…);
+ * otherwise STEER exactly one blocker this turn and BLOCK on it. Only the steered goal's
+ * entry is persisted (via `save`), so only its counter moves — the others stay put until
+ * their turn.
+ *
+ * ROTATION (round-robin, stateless): steer the blocker belay steered LEAST RECENTLY — the
+ * one whose portfolio entry `updated_at` (`steeredAt`) is oldest (never-steered = 0 = first);
+ * ties break by goalId. On steering we persist that entry (updated_at = now), sending it to
+ * the back of the line, so successive stops fan across the whole owned set and each goal gets
+ * driven. `awaiting` (B7) is session-level: when set, every unit's decideStop short-circuits
+ * to an allow → no blockers → the portfolio allows (consistent with the single-goal path).
+ *
+ * TERMINATION (ADR-6, generalized): each owned (session, goal) keeps its OWN durable
+ * continuation counter, capped at `max_continuations` by decideStop exactly as a lone goal is.
+ * Rotation only chooses WHICH counter advances on a given stop — it never resets a cap, skips
+ * one, or refunds a spend. Steering a blocker always advances that goal monotonically toward
+ * its OWN release (an unmet block ⟶ +1 continuation; a one-shot stale/unmet-unknown block ⟶
+ * spends its guard), so no goal can be steered forever. With N (finite) owned goals each
+ * bounded by ~`max_continuations` blocks, the portfolio emits at most ≈ N·(max_continuations+1)
+ * blocks in total and then ALLOWS — provably terminating. Even an adversarial rotation that
+ * fixated on one goal would drain THAT goal to its cap (it then stops blocking), forcing the
+ * next — so the whole set still drains. The block count can only ever be the SUM of the
+ * unchanged per-goal bounds; nothing here raises a single goal's bound.
+ *
+ * @param units array of { goalId, k, entry, steeredAt }
+ * @returns { action, kind, reason?, note?, saves: Array<{goalId,entry}>, steeredGoalId, owned }
+ */
+export function decidePortfolio(p, units, budget, cfg, nowSec = Date.now() / 1000, loops = null, awaiting = false) {
+  const results = units.map((u) => ({ ...u, d: decideStop(p, u.k, budget, cfg, u.entry, nowSec, loops, awaiting) }));
+  const owned = results.length;
+  const blockers = results.filter((r) => r.d.action === 'block');
+
+  if (blockers.length === 0) {
+    // Every owned goal allows — nothing to hold. Persist any allow-path saves (e.g. a
+    // thrash-exhausted release records its streak) so those releases stay durable.
+    const saves = results.filter((r) => r.d.save && r.d.entry).map((r) => ({ goalId: r.goalId, entry: r.d.entry }));
+    return {
+      action: 'allow',
+      kind: 'portfolio-idle',
+      saves,
+      steeredGoalId: null,
+      owned,
+      note: `[belay] portfolio: all ${owned} owned goal(s) this session are converged/exhausted/paused — allowing stop`,
+    };
+  }
+
+  // Round-robin: steer the least-recently-steered blocker (oldest steeredAt first).
+  blockers.sort((a, b) => a.steeredAt - b.steeredAt || (a.goalId < b.goalId ? -1 : a.goalId > b.goalId ? 1 : 0));
+  const chosen = blockers[0];
+  const slug = sanitizeSlug(goalSlug(chosen.k.goal, chosen.k.focus));
+  const remaining = blockers.length - 1;
+  const suffix =
+    ` · [belay portfolio] this session owns ${owned} active goal(s); steering '${slug}' this turn` +
+    (remaining > 0 ? `, ${remaining} other unconverged sibling(s) will be steered on following stops (each independently capped)` : '') +
+    '.';
+  return {
+    action: 'block',
+    kind: chosen.d.kind === 'block' ? 'portfolio-block' : `portfolio-${chosen.d.kind}`,
+    reason: capReason(chosen.d.reason + suffix),
+    note: chosen.d.note ?? null,
+    saves: chosen.d.save && chosen.d.entry ? [{ goalId: chosen.goalId, entry: chosen.d.entry }] : [],
+    steeredGoalId: chosen.goalId,
+    owned,
+  };
+}
+
 /** Append-only Stop-decision journal (~/.belay/decisions.jsonl): one line per evaluated
  *  stop, INCLUDING silent allows — a stop that should have blocked but didn't is otherwise
  *  undiagnosable after the fact (the 2026-07-02 unexplained allow). Self-capping: rewritten
@@ -297,6 +410,31 @@ export async function hookStop() {
   // bin already wraps hooks in a choke-point try/catch; this inner one keeps the
   // never-crash rule local too (ADR-4) — a Stop hook error would wedge the harness.
   try {
+    // B3/ADR-25: does THIS session own >=2 active armed loops (a portfolio)? If so, steer the
+    // whole set (rotate one goal per stop; allow only when ALL converge). A session owning 0
+    // or 1 goal falls through to the pre-B3 SINGLE path below, byte-identical. ownedActiveUnits
+    // is fully guarded (→ [] on any error), so this branch can never crash the hook.
+    const loopsMap = readLoops().loops;
+    const units = ownedActiveUnits(p, loopsMap);
+    if (units.length >= 2) {
+      const { cfg } = readConfig();
+      const own = readOwnState();
+      const budget = readBudget(p.session_id);
+      const awaiting = isAwaiting(p.session_id);
+      const nowSec = Date.now() / 1000;
+      for (const u of units) {
+        u.entry = portfolioEntry(own, p.session_id, u.goalId);
+        u.steeredAt = portfolioSteeredAt(own, p.session_id, u.goalId);
+      }
+      const d = decidePortfolio(p, units, budget, cfg, nowSec, loopsMap, awaiting);
+      for (const s of d.saves ?? []) savePortfolioEntry(own, p.session_id, s.goalId, s.entry, nowSec);
+      journalStop(p, d.kind, d.action, d.steeredGoalId);
+      if (d.note) process.stderr.write(d.note + '\n');
+      if (d.action === 'block') process.stdout.write(JSON.stringify({ decision: 'block', reason: d.reason }));
+      return;
+    }
+
+    // ── single-goal / legacy path (pre-B3, byte-identical) ──
     // No stop_hook_active fast-exit anymore (ADR-6): mid-chain stops must be evaluated
     // so the continuation budget can accumulate and eventually allow. decideStop resets
     // the budget on a FRESH chain and bounds it on mid-chain stops.
