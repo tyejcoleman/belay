@@ -41,10 +41,17 @@ fix/status. Goal `belay-handles-any-loop` drives these to resolution using the l
   keyoku change (per-session focus map, single-focus default preserved); deliberately out of scope
   under the belay-first mandate (published package — not touched, not published).
 
-- [B4] **Session-scoping friction** — STATUS: TRACKED
-  belay loops are session-scoped and require the arming session's `session_id`
+- [B4] **Session-scoping friction** — STATUS: **DONE** (ADR-26)
+  belay loops are session-scoped and required the arming session's `session_id`
   (`$CLAUDE_CODE_SESSION_ID` / transcript filename); easy to get wrong, and no auto-detect.
-  Candidate: belay auto-reads the id from the hook payload / env at arm time.
+  **Fix (ADR-26):** `loopCreate` (`src/loops.mjs`) now DEFAULTS `session_id` to
+  `process.env.CLAUDE_CODE_SESSION_ID` when `scope` is (or defaults to) `'session'` and no
+  `session_id` arg was passed. An explicit arg still always wins; `scope:'global'` never
+  consults the env var; when neither the arg nor the env var is present, the original
+  `step:'scope'` refusal is unchanged, verbatim. Fixed in the shared handler (not the CLI's arg
+  parsing) so BOTH `belay loop create` and the `belay_loop_create` MCP tool benefit with no
+  drift (§2.3). Proof in `test/loops.test.mjs` (env-detect arms pinned to the env id; explicit
+  id still overrides; neither present → the same helpful error). 264 prior + 3 = 267 green.
 
 - [B5] **"Stop hook error" label** — STATUS: WON'T-FIX (external) / MITIGATED
   Claude Code hardcodes the Stop-hook block label as "error" (only alternative is "feedback" via

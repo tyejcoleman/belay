@@ -768,6 +768,37 @@ round-robin drives both, allow-only-when-all-done, cross-session non-interferenc
 termination bound (exactly `N·max_continuations` blocks then release), single-goal backward-compat
 (flat slot, no portfolio wording), corrupt-loops never-crash. 257 prior + 7 = 264 green.
 
+## ADR-26 — session-scoped loop create auto-detects `session_id` from the environment (B4) *(2026-07-07)*
+
+**Decision:** In `loopCreate` (`src/loops.mjs`), when `scope` is (or defaults to) `'session'`
+and no `session_id` was passed in `args`, belay now falls back to
+`process.env.CLAUDE_CODE_SESSION_ID` before applying ADR-14's requirement. An explicit
+`args.session_id` still always wins — the fallback assignment only runs when it is absent — and
+`scope:'global'` never consults it at all, so the existing `scope:'global'` + `session_id`
+contradiction check (ADR-14) sees exactly what the caller passed, unchanged. Only when BOTH the
+explicit argument and the env var are absent does `loopCreate` return the original `step:'scope'`
+refusal, verbatim. Because the resolved `sessionId` is the one binding read used for the rest of
+the pipeline (`goal_focus`'s `sessionId`, the `loops.json` entry, and the `state.json` counter
+reset), an env-detected id gets the exact same pin, arm, and fresh-budget treatment as an
+explicitly-passed one — there is no second, weaker code path.
+
+**Why (B4):** belay loops are session-scoped by default (ADR-14) specifically to avoid
+conscripting a foreign session, but that correctly-strict default made `session_id` a REQUIRED
+argument with no auto-detect — easy to get wrong from the CLI or the MCP tool, and pure friction
+since every Claude Code session already carries its own id in `$CLAUDE_CODE_SESSION_ID`. Reading
+the env var inside `loopCreate` (rather than patching only `bin/belay.mjs`'s arg parsing) means
+BOTH the CLI (`belay loop create`) and the `belay_loop_create` MCP tool get the fix for free —
+one handler, no drift (§2.3 discipline).
+
+**Backward-compat (constraint 1):** identical behavior in every case that worked before — explicit
+`session_id` overrides, `scope:'global'` is unaffected, and "neither present" still produces the
+same helpful error text (`test/loops.test.mjs`'s existing ADR-14 assertions are unchanged and stay
+green). The only NEW behavior is the previously-refused "no explicit id, scope defaults to
+session" case now succeeding when the environment supplies one. **Never-crash (ADR-4):** a plain
+`typeof`/truthiness read of `process.env`, no parsing, no spawn — cannot throw. Proof in
+`test/loops.test.mjs` (env-detect arms with the env id; explicit id still overrides the env var;
+neither present → the same `step:'scope'` error). 264 prior tests stay green.
+
 ## Non-ADR notes
 
 - **Compliance line (from the mission):** official surfaces only — Stop and PreToolUse

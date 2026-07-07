@@ -92,7 +92,9 @@ const refuse = (error) => ({ ok: false, error });
  * @param {{ goal?: string, objective?: string, criteria?: object[], constraints?: string[],
  *          maxIterations?: number, confirm_autonomous?: boolean, scope?: 'session'|'global',
  *          session_id?: string, cwd?: string, proposal_id?: string }} args — belay_loop_create
- *          schema, verbatim. Default scope 'session' REQUIRES session_id (ADR-14).
+ *          schema, verbatim. Default scope 'session' REQUIRES session_id (ADR-14) — auto-
+ *          detected from $CLAUDE_CODE_SESSION_ID when omitted (ADR-26/B4); still refused
+ *          if neither is present.
  * @returns {Promise<object>} { ok:true, goal, status, next } | { ok:false, step, error }
  */
 /** Provably-unsatisfiable criterion pairs: two assertions on the SAME probe and path that
@@ -136,7 +138,7 @@ export async function loopCreate(args = {}) {
   const steps = [];
   const fail = (step, error) => ({ ok: false, step, error, steps });
   const cwd = typeof args.cwd === 'string' && args.cwd ? args.cwd : process.cwd();
-  const sessionId = typeof args.session_id === 'string' && args.session_id ? args.session_id : null;
+  let sessionId = typeof args.session_id === 'string' && args.session_id ? args.session_id : null;
   const ref = typeof args.goal === 'string' && args.goal ? args.goal : null;
 
   // 0 — scope (ADR-14): loops are SESSION-scoped by default. keyoku's focus is a global
@@ -147,6 +149,15 @@ export async function loopCreate(args = {}) {
   const scope = args.scope === undefined ? 'session' : args.scope;
   if (scope !== 'session' && scope !== 'global') {
     return fail('scope', `scope must be 'session' or 'global' (got '${sanitizeSlug(String(scope), 24)}')`);
+  }
+  // B4 (LOOP-BOTTLENECKS.md): auto-detect the arming session's id from the environment
+  // when session-scoped and none was explicitly passed — every Claude Code session already
+  // has this in-process, so requiring it as an explicit arg was pure friction. An explicit
+  // session_id always wins (this branch never runs when one was passed); scope:'global'
+  // never consults it, so its sessionId stays exactly what the caller passed and the
+  // contradiction check right below is unaffected.
+  if (scope === 'session' && !sessionId && typeof process.env.CLAUDE_CODE_SESSION_ID === 'string' && process.env.CLAUDE_CODE_SESSION_ID) {
+    sessionId = process.env.CLAUDE_CODE_SESSION_ID;
   }
   if (scope === 'session' && !sessionId) {
     return fail(

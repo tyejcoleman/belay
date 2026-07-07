@@ -50,7 +50,7 @@ export const TOOLS = [
   {
     name: 'belay_loop_create',
     description:
-      "Create-and-arm an autonomous convergence loop. Either reference an existing keyoku goal or define one inline (criteria = machine-checkable probes + assertions, forwarded verbatim to keyoku's own goal_create). Belay routes all writes through keyoku's own process, focuses the goal, arms the loop, and returns the first would-block verdict. SCOPE (ADR-14): loops are SESSION-scoped by default — session_id is REQUIRED (the focus is pinned so only YOUR session is held) unless you pass scope:'global', which holds EVERY Claude Code session under the cwd subtree (an explicit opt-in; use only when conscripting sibling sessions is intended). THIS CALL IS THE CONFIRMATION that an autonomous loop should run; irreversible actions remain human-gated by the PreToolUse fall-arrest regardless.",
+      "Create-and-arm an autonomous convergence loop. Either reference an existing keyoku goal or define one inline (criteria = machine-checkable probes + assertions, forwarded verbatim to keyoku's own goal_create). Belay routes all writes through keyoku's own process, focuses the goal, arms the loop, and returns the first would-block verdict. SCOPE (ADR-14): loops are SESSION-scoped by default — session_id is REQUIRED (the focus is pinned so only YOUR session is held) unless you pass scope:'global', which holds EVERY Claude Code session under the cwd subtree (an explicit opt-in; use only when conscripting sibling sessions is intended). If session_id is omitted, belay auto-detects it from $CLAUDE_CODE_SESSION_ID (ADR-26/B4); still refused if neither is present. THIS CALL IS THE CONFIRMATION that an autonomous loop should run; irreversible actions remain human-gated by the PreToolUse fall-arrest regardless.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -77,7 +77,8 @@ export const TOOLS = [
         },
         session_id: {
           type: 'string',
-          description: "the arming session's id (from the hook payload or the transcript path) — REQUIRED unless scope:'global'; the focus and the loop are pinned to it",
+          description:
+            "the arming session's id (from the hook payload or the transcript path) — REQUIRED unless scope:'global', but auto-detected from $CLAUDE_CODE_SESSION_ID when omitted; the focus and the loop are pinned to it. An explicit value here always overrides the env auto-detect.",
         },
         cwd: { type: 'string', description: 'scope the focus to this project subtree (default: server cwd)' },
         proposal_id: { type: 'string', description: 'when arming a surfaced proposal — marks it armed in the proposal log' },

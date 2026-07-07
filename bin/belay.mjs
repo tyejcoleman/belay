@@ -182,7 +182,8 @@ usage:
                     [--constraints <json>] [--max-iterations <n>] [--confirm-autonomous]
                     [--session-id <id> | --scope global] [--cwd <dir>] [--proposal-id <id>]
                                                    create-and-arm an autonomous convergence loop (writes via keyoku's own process;
-                                                   session-scoped by default — --session-id required unless --scope global)
+                                                   session-scoped by default — --session-id required unless --scope global,
+                                                   or auto-detected from $CLAUDE_CODE_SESSION_ID when omitted)
   belay loop list                                  loop-relevant goals × arm/pause state × counters
   belay loop pause <goal> [--note <text>]          pause the Stop-hook hold (the fall-arrest gate stays active)
   belay loop resume <goal>                         resume a paused loop (re-demands fresh goal_assess)

@@ -456,6 +456,54 @@ test('loop create: scope global arms an UNPINNED cwd focus (explicit opt-in) and
   assert.equal(readLoopsFile(h).loops[out.goal.id].loop_scope, 'global');
 });
 
+// ── B4 / ADR-26: session_id auto-detected from $CLAUDE_CODE_SESSION_ID ──────────────────
+// helpers.mjs's env(h) strips CLAUDE_CODE_SESSION_ID for every SPAWNED CLI world (hermeticity),
+// so these call loopCreate directly, in-process, with withEnv(worldEnv(...)) setting/restoring
+// the var exactly like the other direct-call tests above (e.g. line 348).
+
+test('loop create: no session_id, no scope → auto-detects $CLAUDE_CODE_SESSION_ID (B4/ADR-26) and pins the loop to it', async () => {
+  const h = homes();
+  writeClaudeJson(h);
+  await withEnv(worldEnv(h, { CLAUDE_CODE_SESSION_ID: 'env-sess-1' }), async () => {
+    const out = await loopCreate({ objective: 'x', criteria: JSON.parse(CRITERIA), cwd: '/tmp/proj' });
+    assert.equal(out.ok, true, JSON.stringify(out));
+  });
+  const focus = JSON.parse(readFileSync(join(h.keyoku, 'focus.json'), 'utf8'));
+  assert.equal(focus.sessionId, 'env-sess-1'); // env-detected id reached goal_focus, same as an explicit one
+  const loops = readLoopsFile(h);
+  const goalId = Object.keys(loops.loops)[0];
+  assert.equal(loops.loops[goalId].session_id, 'env-sess-1');
+  assert.equal(loops.loops[goalId].loop_scope, 'session');
+});
+
+test('loop create: an EXPLICIT session_id still overrides $CLAUDE_CODE_SESSION_ID (B4/ADR-26)', async () => {
+  const h = homes();
+  writeClaudeJson(h);
+  await withEnv(worldEnv(h, { CLAUDE_CODE_SESSION_ID: 'env-sess-should-be-ignored' }), async () => {
+    const out = await loopCreate({ objective: 'x', criteria: JSON.parse(CRITERIA), session_id: 'explicit-sess', cwd: '/tmp/proj' });
+    assert.equal(out.ok, true, JSON.stringify(out));
+  });
+  const focus = JSON.parse(readFileSync(join(h.keyoku, 'focus.json'), 'utf8'));
+  assert.equal(focus.sessionId, 'explicit-sess');
+  const loops = readLoopsFile(h);
+  const goalId = Object.keys(loops.loops)[0];
+  assert.equal(loops.loops[goalId].session_id, 'explicit-sess');
+});
+
+test('loop create: neither explicit session_id nor $CLAUDE_CODE_SESSION_ID present → the SAME helpful scope error as before (B4/ADR-26 changes nothing here)', async () => {
+  const h = homes();
+  writeClaudeJson(h);
+  await withEnv(worldEnv(h, { CLAUDE_CODE_SESSION_ID: undefined }), async () => {
+    const out = await loopCreate({ objective: 'x', criteria: JSON.parse(CRITERIA) });
+    assert.equal(out.ok, false);
+    assert.equal(out.step, 'scope');
+    assert.match(out.error, /session_id/);
+    assert.match(out.error, /'global'/);
+  });
+  assert.equal(existsSync(join(h.keyoku, 'goals.json')), false); // refused BEFORE any spawn, exactly as before
+  assert.equal(existsSync(join(h.belay, 'loops.json')), false);
+});
+
 // ── belay_loop_disarm ───────────────────────────────────────────────────────────────────
 
 test('loop disarm: focused match → goal_unfocus via the keyoku child (focus.json cleared BY keyoku), entry removed, belay back to no-op', async () => {
