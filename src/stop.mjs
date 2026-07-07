@@ -245,7 +245,21 @@ export function decideStop(_p, k, budget, cfg, entry, nowSec = Date.now() / 1000
   } else if (stalled) {
     guidance = `You have been stuck on the SAME unmet set for ${sameUnmetCount} assessments. This approach will not converge: STAND DOWN this turn — mark the goal blocked or abandoned in keyoku (goal_update) with the concrete blocker, or escalate to a human with a summary of what is stuck and why. belay RELEASES the hold on your next stop regardless; do not keep repeating the same attempt.`;
   } else if (thrashing) {
-    guidance = `These SAME criteria have not moved across ${sameUnmetCount} assessments — your current approach is not working. STOP repeating it: run the failing probe yourself, read its ACTUAL output, goal_record the diagnosis, then CHANGE strategy. If the next assessment still shows no change, mark the goal blocked or abandoned in keyoku (goal_update) with the reason — belay releases the hold on any non-active goal.`;
+    // B8: the escalating "your approach is not working … belay releases the hold" guidance
+    // below is MISLEADING for a declared MILESTONE — belay is NOT going to release it (the
+    // early-release is suppressed above, effectiveThrashRelease = Infinity, so `stalled` can
+    // never fire for this goal) and the premise is false: a milestone's coarse criteria flip
+    // rarely by design, so a constant unmet set across a handful of assessments while real
+    // per-session progress lands is EXPECTED, not a sign of a failing approach. Soften to a
+    // calm, milestone-appropriate note that (a) states belay IS holding, not releasing, (b)
+    // explains why non-flipping progress is normal, and (c) offers constructive next steps —
+    // rather than repeating a threat belay does not act on. Text-only: `thrashing`, `kind`,
+    // and the block/save/entry above are computed identically for milestone and non-milestone
+    // goals, so the block/allow decision and continuation counters are untouched (ADR-6, B1).
+    // Non-milestone goals keep the ORIGINAL escalating wording, byte-identical.
+    guidance = isMilestone
+      ? `You have been on the SAME unmet set for ${sameUnmetCount} assessments — for this declared MILESTONE that is EXPECTED, not a failure signal: belay is HOLDING (not releasing) and a milestone's coarse criteria flip slowly, so steady per-session progress (commits, goal_record) that doesn't flip a criterion yet is normal. Keep making steady progress. If you are genuinely stuck: split the criteria into finer per-session sub-criteria (goal_update; tracked as B2), goal_record a diagnosis of the concrete blocker, or — only if truly unworkable — mark the goal blocked in keyoku (goal_update).`
+      : `These SAME criteria have not moved across ${sameUnmetCount} assessments — your current approach is not working. STOP repeating it: run the failing probe yourself, read its ACTUAL output, goal_record the diagnosis, then CHANGE strategy. If the next assessment still shows no change, mark the goal blocked or abandoned in keyoku (goal_update) with the reason — belay releases the hold on any non-active goal.`;
   } else {
     // Prioritization nudge: a model scattering across many unmet criteria makes no measurable
     // progress. Preserves the "run goal_assess to verify (never claim convergence without it)"

@@ -99,3 +99,53 @@ test('config: milestone_iterations validates — default 200, override honored, 
   assert.equal(bad.cfg.milestone_iterations, 200);
   assert.match(bad.warnings.join(' '), /milestone_iterations/);
 });
+
+// ── B8: the thrash-threshold WARNING is misleading for a milestone — belay is not going to
+// release it (the early-release is already suppressed by B1/ADR-23), yet the pre-existing
+// guidance threatened "your approach is not working … belay releases the hold". A MILESTONE
+// goal past the thrash threshold now gets a calm, milestone-appropriate note instead; a
+// NON-milestone goal at the identical point keeps the original escalating warning verbatim.
+
+test('B8: milestone goal past the thrash threshold gets the calm "expected, not failing" note — NOT the release threat', () => {
+  const cfg = { thrash_threshold: 2, thrash_release: 3, max_continuations: 10, milestone_iterations: 200 };
+  const h = homes();
+  writeKeyoku(h, { goals: [goal({ maxIterations: 1000, usedIterations: 40 })], focus: focusFor(), obsLines: [obs()] });
+  writeTokenroom(h, { leftPct: 72 });
+  mkdirSync(h.belay, { recursive: true });
+  writeFileSync(join(h.belay, 'config.json'), JSON.stringify(cfg));
+
+  const b1 = JSON.parse(stop(h).stdout); // sameUnmetCount 1, below thrash_threshold 2
+  assert.match(b1.reason, /Pick ONE unmet criterion/);
+
+  const b2 = JSON.parse(stop(h, stopPayload({ stop_hook_active: true })).stdout); // sameUnmetCount 2, thrashing
+  assert.equal(b2.decision, 'block');
+  assert.match(b2.reason, /declared MILESTONE/);
+  assert.match(b2.reason, /is HOLDING \(not releasing\)/);
+  assert.match(b2.reason, /EXPECTED, not a failure signal/);
+  // the old escalating threat must be ABSENT for a milestone
+  assert.doesNotMatch(b2.reason, /your current approach is not working/);
+  assert.doesNotMatch(b2.reason, /belay releases the hold/);
+
+  // stays calm on the NEXT thrashing block too (not a one-shot) — still holding, still calm.
+  const b3 = JSON.parse(stop(h, stopPayload({ stop_hook_active: true })).stdout); // sameUnmetCount 3
+  assert.equal(b3.decision, 'block');
+  assert.match(b3.reason, /declared MILESTONE/);
+  assert.doesNotMatch(b3.reason, /your current approach is not working/);
+});
+
+test('B8: a NON-milestone goal at the identical thrash point keeps the escalating warning UNCHANGED', () => {
+  const cfg = { thrash_threshold: 2, thrash_release: 3, max_continuations: 10, milestone_iterations: 200 };
+  const h = homes();
+  writeKeyoku(h, { goals: [goal()], focus: focusFor(), obsLines: [obs()] }); // maxIterations 50 < 200 → not a milestone
+  writeTokenroom(h, { leftPct: 72 });
+  mkdirSync(h.belay, { recursive: true });
+  writeFileSync(join(h.belay, 'config.json'), JSON.stringify(cfg));
+
+  JSON.parse(stop(h).stdout); // sameUnmetCount 1
+  const b2 = JSON.parse(stop(h, stopPayload({ stop_hook_active: true })).stdout); // sameUnmetCount 2, thrashing
+  assert.equal(b2.decision, 'block');
+  assert.match(b2.reason, /SAME criteria have not moved across 2 assessments — your current approach is not working/);
+  assert.match(b2.reason, /CHANGE strategy/);
+  assert.match(b2.reason, /belay releases the hold on any non-active goal/);
+  assert.doesNotMatch(b2.reason, /declared MILESTONE/);
+});

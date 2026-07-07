@@ -86,3 +86,28 @@ fix/status. Goal `belay-handles-any-loop` drives these to resolution using the l
   every block path and its cap byte-for-byte unchanged, so ADR-6 termination is untouched (the block
   count can only DECREASE). Proof in `test/await-async.test.mjs` (marker→allow, byte-identity without
   the marker, session-scope A-allows-B-blocks, plus module + CLI edges).
+
+- [B8] **Milestone thrash-WARNING still fires, misleadingly** — STATUS: **DONE** (ADR-27, found live
+  via dogfooding on openkakushin-recomp)
+  **Symptom:** B1 (ADR-23) made belay milestone-aware: for a goal with `maxIterations >=
+  cfg.milestone_iterations` (a declared multi-session milestone), the thrash EARLY-RELEASE is
+  suppressed (belay keeps holding it). But the EARLIER thrash-threshold WARNING guidance in
+  `decideStop` (`src/stop.mjs`, the `thrashing` branch, fires once `sameUnmetCount >=
+  cfg.thrash_threshold`) kept firing for milestones too, with escalating text like *"these SAME
+  criteria have not moved across N assessments — your current approach is not working. STOP
+  repeating it… CHANGE strategy… if the next assessment still shows no change, mark the goal
+  blocked/abandoned — belay releases the hold."* Observed live on openkakushin-recomp
+  (`maxIterations: 1000`): real committed shim progress every turn, but the criteria don't flip,
+  so belay nagged "change strategy or I release" — a threat it structurally would not act on (the
+  release is suppressed by B1). **Root cause:** the `thrashing` branch keyed off
+  `cfg.thrash_threshold` directly (unaffected by ADR-23's `effectiveThrashRelease`), and its
+  premise — "not moving = your approach isn't working" — is false for a milestone: coarse
+  criteria flip slowly by design, so steady non-flipping progress is NORMAL, not thrash. **Fix
+  (ADR-27):** for MILESTONE goals only, the `thrashing` guidance TEXT is softened — drops the
+  "approach isn't working / mark blocked / belay releases" threat and replaces it with a calm
+  note: belay IS holding (not releasing); non-flipping progress is expected for a milestone's
+  coarse criteria; keep making steady progress; and if genuinely stuck, split criteria into finer
+  sub-criteria (B2), record a diagnosis, or mark it blocked only if truly unworkable.
+  Non-milestone goals keep the ORIGINAL escalating warning, byte-identical. Block/allow
+  decisions, continuation counters, and all caps are untouched (ADR-6 intact on both axes). Proof
+  in `test/milestone-progress.test.mjs` (269 total green).

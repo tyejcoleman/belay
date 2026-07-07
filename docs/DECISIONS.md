@@ -799,6 +799,58 @@ session" case now succeeding when the environment supplies one. **Never-crash (A
 `test/loops.test.mjs` (env-detect arms with the env id; explicit id still overrides the env var;
 neither present → the same `step:'scope'` error). 264 prior tests stay green.
 
+## ADR-27 — milestone-softened thrash guidance: the escalation threat doesn't apply to a hold belay won't release (B8) *(2026-07-07)*
+
+**Decision:** In `decideStop`'s `thrashing` guidance branch (`src/stop.mjs`), the escalating
+"your current approach is not working … belay releases the hold" wording is now gated on
+`isMilestone` (the same ADR-23/B1 signal, `maxIterations >= cfg.milestone_iterations`) — computed
+identically, reused as-is. **Non-milestone goals get the ORIGINAL text, byte-identical.**
+**Milestone goals get a calm, milestone-appropriate note instead:** it states belay IS holding
+(not releasing), explains that a milestone's coarse criteria flip slowly so a non-flipping unmet
+set across a handful of assessments is EXPECTED — not a sign the approach is failing — and offers
+constructive next steps: split the criteria into finer per-session sub-criteria (`goal_update`,
+tracked as B2), `goal_record` a diagnosis of the concrete blocker, or — only if truly unworkable —
+mark the goal blocked. This is a TEXT-ONLY change: the `thrashing`/`stalled`/`lastHeld` booleans,
+the `kind` selection, the `action: 'block'`, `save`, and `entry` (continuation counter,
+`sameUnmetCount`, `lastUnmetHash`) are all computed exactly as before and are IDENTICAL for
+milestone and non-milestone goals — only the `guidance` string embedded in the reason branches on
+`isMilestone`. Exactly the ADR-21 precedent (guidance text changes, never the decision).
+
+**Why (B8, surfaced live by the dogfood loop):** B1/ADR-23 already suppresses the thrash
+EARLY-RELEASE for a declared milestone (`effectiveThrashRelease = Infinity`, so `stalled` — which
+carries "belay RELEASES the hold on your next stop regardless" — can never fire for one). But the
+EARLIER `thrashing` warning (fires once `sameUnmetCount >= cfg.thrash_threshold`, well before
+`thrash_release`) was untouched by B1 and kept firing every block thereafter for a milestone goal,
+because it keys off `cfg.thrash_threshold` directly, not `effectiveThrashRelease`. Its wording is
+doubly wrong for a milestone: (a) it threatens a release belay will not perform (the early-release
+is suppressed), and (b) its premise — "these criteria haven't moved, so your approach isn't
+working" — is false for a goal whose criteria are DELIBERATELY coarse multi-session milestones;
+real per-session progress (commits, `goal_record`) is expected to NOT flip such a criterion for a
+while. Observed live on `openkakushin-recomp` (`maxIterations: 1000`): real committed shim
+progress each turn, yet belay nagged "change strategy or I release" every block once
+`sameUnmetCount` crossed `thrash_threshold` — a threat it structurally could not carry out.
+
+**Constraint 1 (block/allow decisions untouched):** the edit sits entirely inside the
+already-`action: 'block'` path's guidance-string selection, AFTER `action`, `kind`, and the
+persisted `entry` are computed — none of those four are read from or written by the new branch.
+`kind` in particular stays `'block-thrash'` for a thrashing milestone goal exactly as it was before
+this change (verified against `src/insights.mjs`'s `HELD` set, which already treated `block-thrash`
+as a held/blocking kind regardless of milestone status). ADR-6 termination is untouched on both
+axes: per session `max_continuations` is the same hard cap, and across sessions keyoku's
+`iterations-exhausted` stop is unaffected — this ADR changes zero decision logic.
+
+**Constraint 2 (non-milestone byte-identical):** the `else` arm of the new `isMilestone` check is
+the ORIGINAL string, unedited, so every existing non-milestone thrash test (`test/stop.test.mjs`)
+passes unchanged with no test edits.
+
+**Never-crash (ADR-4):** the new branch is a plain ternary over an already-computed boolean —
+cannot throw. Proof: `test/milestone-progress.test.mjs` adds two tests — a milestone goal at and
+past the `thrash_threshold` gets the calm note (asserts the new wording present, the old
+"approach is not working" / "belay releases the hold" threat ABSENT, across two consecutive
+thrashing blocks so it's not a one-shot), and a non-milestone goal at the identical config/point
+gets the original escalating warning verbatim (asserts the exact old wording, and that the new
+milestone wording is ABSENT). 267 prior + 2 = 269 green.
+
 ## Non-ADR notes
 
 - **Compliance line (from the mission):** official surfaces only — Stop and PreToolUse
