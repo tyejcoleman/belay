@@ -132,6 +132,7 @@ export const CONFIG_DEFAULTS = {
   stale_assess_min: 60, // observations older than this get one "run goal_assess first" block, then allow
   thrash_threshold: 3, // identical-unmet blocks before the Stop reason switches to "change strategy" guidance (ADR-21)
   thrash_release: 8, // identical-unmet blocks before belay escalates then RELEASES a stalled loop early (adaptive budget, ADR-21) — well under max_continuations
+  milestone_iterations: 200, // a goal DECLARING a horizon >= this is a multi-session MILESTONE (coarse criteria flip rarely) — early thrash-release is suppressed for it, leaving max_continuations as the sole per-session bound (ADR-23, B1)
   gate_enabled: true, // PreToolUse policy gate master switch
   gate_mode: 'ask', // 'ask' routes irreversible classes to the human live; 'defer' denies-with-guidance and queues them for one batched review at convergence (ADR-16)
   ask_patterns: [], // extra [{pattern, class, note}] — tested against BOTH tool_name and Bash command
@@ -165,7 +166,7 @@ export function validateConfig(raw) {
   if (typeof raw !== 'object' || Array.isArray(raw)) {
     return { cfg, warnings: ['config.json is not a JSON object — using defaults'] };
   }
-  for (const key of ['max_continuations', 'budget_floor_pct', 'spawn_floor_pct', 'thin_budget_pct', 'stale_assess_min', 'thrash_threshold', 'thrash_release', 'proposal_max_surfaced', 'stale_converged_days', 'keyoku_call_timeout_ms', 'slm_timeout_ms']) {
+  for (const key of ['max_continuations', 'budget_floor_pct', 'spawn_floor_pct', 'thin_budget_pct', 'stale_assess_min', 'thrash_threshold', 'thrash_release', 'milestone_iterations', 'proposal_max_surfaced', 'stale_converged_days', 'keyoku_call_timeout_ms', 'slm_timeout_ms']) {
     if (raw[key] === undefined) continue;
     // keyoku_call_timeout_ms needs a sane floor (refute L2-5): 0 passed the >=0 check and
     // made EVERY keyoku RPC time out instantly (setTimeout(...,0) fires before spawn+SDK

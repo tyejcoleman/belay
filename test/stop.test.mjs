@@ -17,7 +17,7 @@ test('focused autonomous goal + unmet + healthy budget → block JSON with unmet
   assert.equal(r.status, 0);
   const out = JSON.parse(r.stdout);
   assert.equal(out.decision, 'block');
-  assert.match(out.reason, /^\[belay\] goal 'ship-widget' not converged — unmet: c1: tests green; c2: deployed to prod\./);
+  assert.match(out.reason, /^\[belay ⟳ steering\] goal 'ship-widget' not converged — unmet: c1: tests green; c2: deployed to prod\./);
   assert.match(out.reason, /run goal_assess to verify \(never claim convergence without it\)/);
   assert.match(out.reason, /5h: 72% left\.$/);
 

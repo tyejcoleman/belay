@@ -597,6 +597,91 @@ observable (measured live: 94% idle, 204 foreign-session stops correctly allowed
 reads over belay's own files (no new keyoku dependency, no new MCP tool — the 7-tool surface stays
 frozen, ADR-9); the gate-journal write is best-effort and never affects a decision (ADR-4).
 
+## ADR-23 — milestone-aware early release: the declared horizon gates the thrash release (B1) *(2026-07-06)*
+
+**Decision:** The ADR-21 adaptive early-release (`sameUnmetCount > thrash_release` ⇒
+`thrash-exhausted` allow) is now SUPPRESSED for a goal that DECLARES a multi-session-milestone
+horizon — `maxIterations >= cfg.milestone_iterations` (default 200). For such a goal the
+effective release threshold is raised to Infinity, so `cfg.max_continuations` is the SOLE
+per-session bound; the ADR-21 change-strategy guidance still fires (it never promises a release),
+and the `stalled` "releases next turn" wording is withheld (it would be a lie). One derived value
+(`effectiveThrashRelease`) replaces `cfg.thrash_release` in the two spots it was read; a goal with
+no declared horizon (`maxIterations` absent) is NOT a milestone and behaves exactly as before, so
+non-milestone goals are byte-identical.
+
+**Why (B1):** belay measured progress ONLY as the unmet-criteria SET changing (`lastUnmetHash` /
+`sameUnmetCount`). A goal whose criteria are big multi-session milestones (e.g. openkakushin-recomp
+"the whole engine shim") makes real per-session progress — commits, `goal_record` iterations — that
+never *flips* a coarse criterion, so the unmet set stays constant and belay wrongly escalated and
+RELEASED a productively-advancing loop (observed live: "same criteria across 4 assessments →
+releasing the hold" on a loop committing real bricks each turn). The signal that a goal is a genuine
+long-horizon milestone is the human-DECLARED `maxIterations`, not any per-turn activity.
+
+**Anti-gaming / termination (constraint 3, ADR-6 preserved):** the gate keys off the goal's DECLARED
+horizon — a STATIC field the in-loop agent does not move by calling `goal_record("still stuck")`
+every turn (recording bumps `usedIterations`, which drives the goal TOWARD keyoku's
+`iterations-exhausted` stop, never away from it). Even an agent that deliberately inflated
+`maxIterations` via `goal_update` cannot loop forever, because TWO independent backstops still bound
+it: (1) per session, `max_continuations` still hard-caps blocks — a milestone loop releases AT
+`max_continuations`, never later than a normal goal's cap (proved: a no-progress milestone loop hits
+`continuations-exhausted`); (2) across sessions, keyoku refuses further iterations once
+`usedIterations >= maxIterations`, and every recorded turn walks toward it. So a genuinely-stuck
+milestone loop still terminates on BOTH axes; the gate only trades the ~`thrash_release` early
+release for the `max_continuations` cap, and only for a horizon the human explicitly declared long.
+`usedIterations`-delta-as-progress was REJECTED as the primary signal: recording junk bumps it, so
+it is gameable without the horizon anchor. Pure file reads, no spawn, degrades to normal behavior on
+any parse failure (ADR-4). All 247 prior tests stay green; `test/milestone-progress.test.mjs` proves
+both the hold-past-thrash_release and the still-terminates properties.
+
+## ADR-24 — the facilitator's await marker: an allow-only, session-scoped, event-driven stop (B7) *(2026-07-06)*
+
+**Decision:** Belay gains a facilitator-set, SESSION-SCOPED "awaiting async work" marker
+(`~/.belay/await.json`, `{ sessions: { <session_id>: { at } } }`, keyed exactly like
+`state.mjs`). The facilitator sets it with `belay await on` when it dispatches a background
+sub-agent/Workflow and clears it with `belay await off` when the harness auto-resumes it on
+worker completion. In `decideStop()`, when the marker is set for THIS `(session)`, belay
+returns `{ action: 'allow', kind: 'awaiting-async' }` — an unconditional allow placed with the
+other unconditional allows (right after the ADR-2 `not-autonomous` check), ABOVE every block
+path (stale / unmet-unknown / unmet) so it intercepts an otherwise-BLOCKING unconverged
+autonomous goal, and BELOW the intrinsic goal-state allows (loop-paused / converged /
+goal-`<status>` / not-autonomous) so those keep reporting their own kind. The marker is passed
+into `decideStop` as an explicit `awaiting` param (default `false`) that the caller derives
+SOLELY from the Stop payload's own `session_id` (`hookStop` passes `isAwaiting(p.session_id)`);
+`status.mjs`/`compose.mjs` do not pass it, so the would-block probe reports the durable verdict
+and only the LIVE hook honors the ephemeral marker. The CLI verb `belay await on|off` is a thin
+wrapper over the `src/await.mjs` handlers the hook reads (§2.3 one-handler discipline: CLI and
+hook cannot drift); it resolves the session id from `--session-id` or `$CLAUDE_CODE_SESSION_ID`.
+
+**Why (B7):** When the facilitator dispatches background work and then stops, the Claude Code
+harness already auto-resumes the main agent on worker completion (a task-notification). If the
+facilitator has nothing else independently actionable, belay's Stop-hook forced continuation is
+a WASTED SPIN — tokens burned waiting for an event the harness will deliver anyway (observed
+live: while the keyoku-baseline worker ran, belay kept steering the facilitator). Making the
+loop EVENT-DRIVEN — advance on the worker-completion event, not a forced tick — is "continuous
+but not excessive." The marker is the facilitator's own explicit, opt-in signal; it is not
+inferred, so belay never guesses whether async work is in flight.
+
+**Termination / safety argument (ADR-6 preserved, UNTOUCHED):** `awaiting-async` is an
+ALLOW-ONLY branch — it can only ever return `{ action: 'allow' }`; it NEVER forces a
+continuation and NEVER touches a block path or its cap. Both blocking paths of the ADR-6 proof
+(the unmet-criteria block capped at `max_continuations`, and the one-shot stale / unmet-unknown
+blocks) are byte-for-byte unchanged, and the new branch sits above them, so on any stop it can
+only SHORT-CIRCUIT to allow before a block is ever considered. Therefore the number of blocks
+emitted per `(session, goal)` can only DECREASE, never increase: the bound stays
+`max_continuations + 1` and the loop is still provably terminating. A forgotten marker (crashed
+facilitator) only ever ALLOWS stops — the SAFE direction (the loop goes quiet; it can never
+wedge or over-spin) — and is pruned on the next write like any `state.mjs` entry.
+
+**Session-scoping (constraint 3):** every op is keyed by `session_id`, and the read is derived
+only from the Stop payload's own `session_id`, so setting await in session A can NEVER release
+session B's loop — proved in `test/await-async.test.mjs` (A allowed, B still blocks against the
+identical cwd-scoped goal). **Never-crash (ADR-4):** `isAwaiting` is fully `try/catch`-guarded;
+a missing / garbage / permission-denied marker degrades to `false` (the normal steering path),
+and without the marker `decideStop` is byte-identical to before (the `awaiting=false` default
+makes the branch inert — proved by the deep-equal default-vs-explicit-false test). No spawn, no
+network — a pure file read on belay's own tiny state file. All 251 prior tests stay green;
+`test/await-async.test.mjs` adds 6 (marker→allow, byte-identity, session-scope, module + CLI).
+
 ## Non-ADR notes
 
 - **Compliance line (from the mission):** official surfaces only — Stop and PreToolUse

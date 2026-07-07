@@ -6,6 +6,7 @@ import { readKeyoku, goalSlug, unmetDetail } from './keyoku.mjs';
 import { readBudget } from './budget.mjs';
 import { readOwnState, sessionEntry, saveSessionEntry } from './state.mjs';
 import { readLoops } from './loops.mjs';
+import { isAwaiting } from './await.mjs';
 
 // The Stop hook: hold the session open while the focused Keyoku goal is unconverged,
 // the goal is AUTONOMOUS (ADR-2: observe/suggest/approve all imply a human in the loop),
@@ -40,8 +41,13 @@ export function budgetLine(b, cfg) {
  * defensive file read happens here (§3.2: ~0.1ms, only reached once a focused matched
  * goal exists), so the hook and compose.mjs's 5-arg call return the same verdict.
  * Absent/malformed loops.json → {} → today's decision table exactly (ADR-4).
+ *
+ * `awaiting` (B7, ADR-24) = the facilitator's per-session "awaiting async work" marker; the
+ * caller reads it from the Stop payload's session_id (hookStop) and passes it. When true it
+ * short-circuits to an unconditional `awaiting-async` allow above the block paths; default
+ * false keeps every other call site (status/compose, and every existing test) byte-identical.
  */
-export function decideStop(_p, k, budget, cfg, entry, nowSec = Date.now() / 1000, loops = null) {
+export function decideStop(_p, k, budget, cfg, entry, nowSec = Date.now() / 1000, loops = null, awaiting = false) {
   // `_p` (the stop payload) is deliberately unconsulted since ADR-6 dropped the
   // stop_hook_active branch — kept first-positional for signature stability (hook,
   // compose.mjs, status.mjs and the tests all pass it).
@@ -72,6 +78,23 @@ export function decideStop(_p, k, budget, cfg, entry, nowSec = Date.now() / 1000
   if (g.status === 'converged') return { action: 'allow', kind: 'converged', note: `[belay] goal '${slug}' converged — nothing to hold` };
   if (g.status !== 'active') return { action: 'allow', kind: `goal-${g.status}` }; // blocked / abandoned / anything future
   if (g.autonomy !== 'autonomous') return { action: 'allow', kind: 'not-autonomous' }; // ADR-2
+
+  // ADR-24 (B7): the facilitator has an EXPLICIT "awaiting async work" marker set for THIS
+  // session (`belay await on` on dispatch of a background sub-agent/Workflow; `belay await off`
+  // when the harness auto-resumes it on worker completion). While set, belay ALLOWS the stop so
+  // the loop advances on the harness's completion event, not a forced spin that burns tokens
+  // waiting. `awaiting` is derived by the CALLER solely from the Stop payload's own session_id
+  // (hookStop passes isAwaiting(p.session_id)); status/compose never pass it, so it governs the
+  // LIVE hook only. SESSION-SCOPED by construction — the marker is keyed by session_id, so
+  // setting it in one session can NEVER release another's loop. This is an ALLOW-ONLY branch: it
+  // sits with the other unconditional allows (loop-paused/converged/…), ABOVE every block path
+  // (stale / unmet-unknown / unmet) so it intercepts an otherwise-BLOCKING unconverged autonomous
+  // goal, and BELOW the intrinsic goal-state allows so those keep reporting their own kind. It
+  // never forces a continuation and never touches a block path or its cap, so the ADR-6
+  // termination bound is untouched — it can only REDUCE the block count, never raise it.
+  if (awaiting) {
+    return { action: 'allow', kind: 'awaiting-async', note: `[belay] goal '${slug}': facilitator awaiting async work ('belay await on') — allowing stop; the harness resumes the loop on worker completion ('belay await off' to re-engage steering)` };
+  }
 
   // Keyoku's own iteration budget: once exhausted, keyoku refuses further iterations —
   // continuing would spin without the harness recording progress.
@@ -104,7 +127,7 @@ export function decideStop(_p, k, budget, cfg, entry, nowSec = Date.now() / 1000
       save: true,
       entry: { ...entry, staleBlocked: true },
       reason: capReason(
-        `[belay] goal '${slug}' state is stale (${age}) — run goal_assess first to get ground truth, then act on the fresh verdict (never claim convergence without it). ` +
+        `[belay ⟳ steering] goal '${slug}' state is stale (${age}) — run goal_assess first to get ground truth, then act on the fresh verdict (never claim convergence without it). ` +
           `Feasibility check while you are at it: if that baseline shows a criterion NO action from this session could ever make pass (probe structurally broken, contradictory assertions, target outside your control), do not start the work — mark the goal blocked or abandoned in keyoku (goal_update) with the reason; belay releases the hold on any non-active goal.`
       ),
     };
@@ -139,8 +162,8 @@ export function decideStop(_p, k, budget, cfg, entry, nowSec = Date.now() / 1000
       entry: { ...entry, staleBlocked: true },
       reason: capReason(
         (tailPredates
-          ? `[belay] goal '${slug}' was assessed recently but its assessment observation never landed (the tail predates lastAssessedAt) — run goal_assess to re-establish ground truth before stopping (never claim convergence without it).`
-          : `[belay] goal '${slug}' has no readable assessment observation — run goal_assess to get ground truth before stopping (never claim convergence without it).`) + budgetLine(budget, cfg)
+          ? `[belay ⟳ steering] goal '${slug}' was assessed recently but its assessment observation never landed (the tail predates lastAssessedAt) — run goal_assess to re-establish ground truth before stopping (never claim convergence without it).`
+          : `[belay ⟳ steering] goal '${slug}' has no readable assessment observation — run goal_assess to get ground truth before stopping (never claim convergence without it).`) + budgetLine(budget, cfg)
       ),
     };
   }
@@ -169,13 +192,36 @@ export function decideStop(_p, k, budget, cfg, entry, nowSec = Date.now() / 1000
   const unmetHash = createHash('sha256').update(unmetIds.slice().sort().join(' ')).digest('hex').slice(0, 16);
   const sameUnmetCount = entry.lastUnmetHash === unmetHash ? (entry.sameUnmetCount ?? 0) + 1 : 1;
 
+  // Milestone-aware early release (ADR-23, B1): a goal whose DECLARED keyoku horizon marks it a
+  // multi-session MILESTONE (maxIterations >= cfg.milestone_iterations) has coarse criteria that
+  // flip rarely — real progress (commits, goal_records) lands WITHOUT changing the unmet SET, so a
+  // constant unmet set across a handful of assessments is EXPECTED, not thrash. For such a goal we
+  // SUPPRESS the adaptive early-release (raise it to Infinity) and let cfg.max_continuations be the
+  // SOLE per-session bound. The change-strategy guidance below still fires (honest — it never
+  // promises a release); only the premature RELEASE is withheld, and only for a horizon the human
+  // explicitly declared long.
+  //
+  // Anti-gaming / termination (constraint 3, ADR-6): the signal is the goal's DECLARED horizon — a
+  // STATIC field the in-loop agent does not move by calling goal_record("still stuck") every turn
+  // (recording bumps usedIterations, which drives the goal TOWARD keyoku's iterations-exhausted stop
+  // above, never away from it). Even an agent that deliberately inflated maxIterations via goal_update
+  // cannot loop forever: TWO independent backstops still bound it — (1) per session, max_continuations
+  // still hard-caps blocks (a milestone loop releases AT max_continuations, never later than a normal
+  // goal's cap); (2) across sessions, keyoku refuses iterations once usedIterations >= maxIterations
+  // (the iterations-exhausted allow above), and every recorded turn walks toward it. So a genuinely-
+  // stuck milestone loop still terminates on BOTH axes; the gate only trades the ~thrash_release early
+  // release for the max_continuations cap. A goal with NO declared horizon (max == null) is NOT a
+  // milestone → normal early-release applies. Non-milestone goals are byte-identical to before.
+  const isMilestone = max != null && max >= cfg.milestone_iterations;
+  const effectiveThrashRelease = isMilestone ? Infinity : cfg.thrash_release;
+
   // Adaptive early release (ADR-21): a loop stuck on the SAME unmet set past thrash_release will
   // not converge by continuing. The thrash_release-th block already delivered a model-visible
   // escalation directive (the `stalled` branch below); THIS is the release the turn after, so
   // the effective budget collapses to about thrash_release, far under max_continuations. Still an
   // allow, so the ADR-6 block bound is unaffected; sameUnmetCount is persisted so it stays
   // released (monotonic) until real progress resets the streak.
-  if (sameUnmetCount > cfg.thrash_release) {
+  if (sameUnmetCount > effectiveThrashRelease) {
     return {
       action: 'allow',
       kind: 'thrash-exhausted',
@@ -187,7 +233,7 @@ export function decideStop(_p, k, budget, cfg, entry, nowSec = Date.now() / 1000
 
   const nextContinuations = entry.continuations + 1;
   const lastHeld = nextContinuations >= cfg.max_continuations; // this is the final held block before release
-  const stalled = sameUnmetCount >= cfg.thrash_release; // the escalation block; the release follows next turn
+  const stalled = sameUnmetCount >= effectiveThrashRelease; // the escalation block; the release follows next turn (never fires for a milestone → no false "releases next turn" promise)
   const thrashing = sameUnmetCount >= cfg.thrash_threshold;
 
   let guidance;
@@ -212,7 +258,7 @@ export function decideStop(_p, k, budget, cfg, entry, nowSec = Date.now() / 1000
     kind: lastHeld ? 'block' : stalled ? 'block-stalled' : thrashing ? 'block-thrash' : 'block',
     save: true,
     entry: { ...entry, continuations: nextContinuations, lastUnmetHash: unmetHash, sameUnmetCount },
-    reason: capReason(`[belay] goal '${slug}' not converged — unmet: ${unmetStr}. ${guidance}${budgetLine(budget, cfg)}`),
+    reason: capReason(`[belay ⟳ steering] goal '${slug}' not converged — unmet: ${unmetStr}. ${guidance}${budgetLine(budget, cfg)}`),
   };
 }
 
@@ -264,7 +310,11 @@ export async function hookStop() {
     const own = readOwnState();
     const entry = sessionEntry(own, p.session_id, k.goal.id);
     const budget = readBudget(p.session_id);
-    const d = decideStop(p, k, budget, cfg, entry);
+    // B7 (ADR-24): honor the facilitator's per-session "awaiting async work" marker. Read
+    // here (never-crash → false) and passed in, so decideStop stays a pure decision and the
+    // status/compose would-block probes (which don't pass it) reflect the durable verdict.
+    const awaiting = isAwaiting(p.session_id);
+    const d = decideStop(p, k, budget, cfg, entry, Date.now() / 1000, null, awaiting);
     if (d.save && d.entry) saveSessionEntry(own, p.session_id, d.entry);
     journalStop(p, d.kind, d.action, k.goal.id);
     if (d.note) process.stderr.write(d.note + '\n');

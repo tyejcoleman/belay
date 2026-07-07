@@ -98,6 +98,37 @@ switch (cmd) {
     }
     break;
   }
+  case 'await': {
+    // B7 (ADR-24): the facilitator's per-session "awaiting async work" marker. `belay await on`
+    // when it dispatches a background sub-agent/Workflow, `belay await off` when the harness
+    // auto-resumes it on worker completion. Thin wrapper over the src/await.mjs handlers (the
+    // SAME functions the Stop hook reads via isAwaiting) so CLI and hook can never drift.
+    // ALLOW-ONLY: it can only let the Stop hook allow a stop, never force one (ADR-6 untouched).
+    const f = parseFlags(argv);
+    const sub = f._[0];
+    const sessionId = typeof f.session_id === 'string' && f.session_id ? f.session_id : process.env.CLAUDE_CODE_SESSION_ID;
+    if (sub !== undefined && sub !== 'on' && sub !== 'off') {
+      console.error('belay await <on|off> [--session-id <id>] — set/clear this session\'s "awaiting async work" marker (bare `belay await` reports current state)');
+      process.exitCode = 2;
+      break;
+    }
+    if (typeof sessionId !== 'string' || !sessionId) {
+      console.error('belay await: no session id — pass --session-id <id> or set $CLAUDE_CODE_SESSION_ID (the marker is session-scoped so it cannot affect other loops)');
+      process.exitCode = 2;
+      break;
+    }
+    const aw = await import('../src/await.mjs');
+    if (sub === 'on') {
+      aw.setAwait(sessionId);
+      printJSON({ await: 'on', session_id: sessionId });
+    } else if (sub === 'off') {
+      const was = aw.clearAwait(sessionId);
+      printJSON({ await: 'off', session_id: sessionId, was_set: was });
+    } else {
+      printJSON({ await: aw.isAwaiting(sessionId) ? 'on' : 'off', session_id: sessionId });
+    }
+    break;
+  }
   case 'propose': {
     const f = parseFlags(argv);
     const propose = await import('../src/propose.mjs');
@@ -158,6 +189,9 @@ usage:
   belay loop disarm <goal>                         unfocus via keyoku + clear arm state (belay returns to no-op)
   belay loop retro [<goal> [--no-push] | --limit n]  record a loop's retro (thrash/convergence telemetry); with a goal it also files
                                                    the retro into keyoku's knowledge store (unless --no-push); no goal → list recent retros
+  belay await <on|off> [--session-id <id>]         mark THIS session as awaiting background work (Stop hook then ALLOWS the
+                                                   stop so the loop advances on the harness's worker-completion event, not a
+                                                   forced spin); session-scoped, allow-only — never forces a continuation
   belay propose [--dismiss <id>]                   scan for loop-worthy signals; proposals are advisory, never auto-armed
   belay pending [--clear | --remove <id>]          review actions deferred by gate_mode 'defer' (denied + queued for batched approval)
   belay hook <stop|pre-tool-use|session-start>     (hook commands — wired by install)

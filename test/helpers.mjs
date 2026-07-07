@@ -30,6 +30,7 @@ export const env = (h) => {
   // and the KEYOKU_INSTALL / CLAUDE_JSON escape hatches must not leak in from the shell.
   delete e.KEYOKU_INSTALL;
   delete e.CLAUDE_JSON;
+  delete e.CLAUDE_CODE_SESSION_ID; // the developer's live session id must not leak into a spawned belay child (B7 `belay await` reads it as a fallback)
   return e;
 };
 
