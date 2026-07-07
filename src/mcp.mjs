@@ -82,6 +82,12 @@ export const TOOLS = [
         },
         cwd: { type: 'string', description: 'scope the focus to this project subtree (default: server cwd)' },
         proposal_id: { type: 'string', description: 'when arming a surfaced proposal — marks it armed in the proposal log' },
+        autonomy: {
+          type: 'string',
+          enum: ['L0', 'L1', 'L2'],
+          description:
+            "declares how far the PreToolUse fall-arrest gate may go WITHOUT staging an outward action for batched human review (B6/ADR-28). Omit for today's conservative default: EVERY outward action (git push, gh writes, publishes, etc.) is staged, unchanged. 'L1': a plain, non-force git push to a branch OTHER than main/master is permitted; a gh pr create/merge/edit/delete is permitted. 'L2': additionally permits pushing to main/master. A FIXED always-gated set is NEVER permitted at any level — force pushes (--force/-f/--force-with-lease), npm publish, gh release, repo-destructive gh/repo writes, external sends (email/Slack/social), and anything spending money — these stay staged regardless of this setting.",
+        },
       },
       additionalProperties: false,
     },

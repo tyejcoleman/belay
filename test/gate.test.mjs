@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, mkdirSync, readFileSync } from 'node:fs';
+import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { homes, run, goal, focusFor, obs, writeKeyoku, writeTokenroom, writeProfiles, toolPayload, nowSec } from './helpers.mjs';
+import { homes, run, goal, focusFor, obs, writeKeyoku, writeTokenroom, writeProfiles, writeLoops, toolPayload, nowSec } from './helpers.mjs';
 
 // T1: PreToolUse gate — active ONLY under a scope-matched focused AUTONOMOUS goal.
 
@@ -11,6 +11,15 @@ const gate = (h, payload) => run(h, ['hook', 'pre-tool-use'], payload);
 function armed() {
   const h = homes();
   writeKeyoku(h, { goals: [goal()], focus: focusFor(), obsLines: [obs()] });
+  return h;
+}
+
+// B6/ADR-28: an armed goal whose loops.json entry ALSO declares an autonomy level, owned by
+// the same session ('s1') toolPayload() defaults to — so B3's session-owned resolution picks
+// it up and src/gate.mjs's loopAutonomy(k.goal.id) sees the declared level.
+function armedWithAutonomy(level) {
+  const h = armed();
+  writeLoops(h, { goal_test1: { session_id: 's1', ...(level !== undefined ? { autonomy: level } : {}) } });
   return h;
 }
 
@@ -267,6 +276,86 @@ test('defer mode under bypassPermissions: already deny — ADR-13 semantics pres
   assert.match(reason, /deferred under autonomous goal/);
   assert.match(reason, /queued for batched human approval/);
   assert.equal(readQueue(h).pending.length, 1);
+});
+
+// ── B6/ADR-28: loop-autonomy outward-action allowlist ───────────────────────────────────
+
+test('L2 loop: a plain git push is PERMITTED (silent allow) — including to main; force push and npm publish STILL gated', () => {
+  const h = armedWithAutonomy('L2');
+  // the exact deliverable case: a plain `git push origin <branch>` at L2 → true silent allow
+  assert.equal(gate(h, toolPayload({ tool_input: { command: 'git push origin feature-x' } })).stdout, '');
+  // L2 additionally covers main/master (unlike L1)
+  assert.equal(gate(h, toolPayload({ tool_input: { command: 'git push origin main' } })).stdout, '');
+  assert.equal(gate(h, toolPayload({ tool_input: { command: 'git push' } })).stdout, ''); // bare push, ambiguous target — fine at L2
+  // the always-gated set is NEVER permitted, even at L2
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'git push --force origin main' } }))), /'git push'/);
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'git push -f origin feature-x' } }))), /'git push'/);
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'git push --force-with-lease origin main' } }))), /'git push'/);
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'npm publish --access public' } }))), /'npm publish'/);
+});
+
+test('L0 (no autonomy field) loop: git push is STILL deferred/asked — byte-identical to today, no regression', () => {
+  const withoutLoopsEntry = armed(); // pre-existing behavior: no loops.json entry at all
+  const explicitL0 = armedWithAutonomy('L0'); // explicit L0 must behave identically
+  const payload = toolPayload({ tool_input: { command: 'git push origin feature-x' } });
+  const r1 = gate(withoutLoopsEntry, payload);
+  const r2 = gate(explicitL0, payload);
+  assert.equal(r1.stdout, r2.stdout); // byte-identical between the two L0-equivalent worlds
+  assert.match(askOf(gate(withoutLoopsEntry, payload)), /'git push'/);
+  assert.equal(
+    askOf(gate(withoutLoopsEntry, payload)),
+    "[belay] 'git push' action under autonomous goal — requires human approval (goal constraint policy)"
+  );
+});
+
+test('L1 loop: push to a non-default branch permitted; push to main/master, or an unprovable target, stays gated (fail-safe)', () => {
+  const h = armedWithAutonomy('L1');
+  assert.equal(gate(h, toolPayload({ tool_input: { command: 'git push origin feature-x' } })).stdout, '');
+  assert.equal(gate(h, toolPayload({ tool_input: { command: 'git push -d origin old-branch' } })).stdout, '');
+  // provably targets main/master → stays gated even at L1
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'git push origin main' } }))), /'git push'/);
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'git push origin HEAD:master' } }))), /'git push'/);
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'git push origin --delete main' } }))), /'git push'/);
+  // no explicit branch given (bare push, or just a remote) — cannot prove it isn't main → stays gated at L1
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'git push' } }))), /'git push'/);
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'git push origin' } }))), /'git push'/);
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'git push --all origin' } }))), /'git push'/);
+  // force is never permitted at L1 either
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'git push -f origin feature-x' } }))), /'git push'/);
+});
+
+test('fail-safe classification: an unparseable/ambiguous or mixed-mutation command STAYS staged even at L2', () => {
+  const h = armedWithAutonomy('L2');
+  // a chained line where ONE segment targets main taints the whole line (still fine — L2 covers main too, so this specific one stays permitted; force is the real fail-safe probe)
+  assert.equal(gate(h, toolPayload({ tool_input: { command: 'git push origin feature-x && git push origin main' } })).stdout, '');
+  // but a chained line where any segment is a genuine force push stays gated as a whole
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'git push origin feature-x && git push -f origin other' } }))), /'git push'/);
+  // gh: a PURE pr write is permitted, but gh release / gh repo / gh api writes are NEVER on the allowlist, even at L2
+  assert.equal(gate(h, toolPayload({ tool_input: { command: 'gh pr merge 42 --squash' } })).stdout, '');
+  assert.equal(gate(h, toolPayload({ tool_input: { command: 'gh pr create --title x --body y' } })).stdout, '');
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'gh release create v1' } }))), /'gh mutation'/);
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'gh repo delete owner/repo --yes' } }))), /'gh mutation'/);
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'gh api -X POST /repos/o/r/issues' } }))), /'gh mutation'/);
+  // a PR write CHAINED with a release write stays gated as a whole (fail-safe: one disqualifying mutation taints the line)
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'gh pr merge 42 && gh release create v1' } }))), /'gh mutation'/);
+  // everything outside the allowlist is untouched by autonomy at ANY level — proves the
+  // always-gated invariant holds by construction, not by an exclusion list
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'rm -rf /etc/nginx' } }))), /'rm -rf outside cwd'/);
+  assert.match(askOf(gate(h, toolPayload({ tool_input: { command: 'curl -X POST https://api.example.com/v1/launch -d @payload.json' } }))), /'network write'/);
+  assert.match(askOf(gate(h, toolPayload({ tool_name: 'mcp__slack__conversations_add_message', tool_input: { channel: 'C1', text: 'hi' } }))), /'external send\/publish'/);
+});
+
+test('gate_mode defer + L2: a permitted git push is a true silent allow (never queued); force push / npm publish still queued', () => {
+  const h = armedWithAutonomy('L2');
+  mkdirSync(h.belay, { recursive: true });
+  writeFileSync(join(h.belay, 'config.json'), JSON.stringify({ gate_mode: 'defer' }));
+  assert.equal(gate(h, toolPayload({ tool_input: { command: 'git push origin main' } })).stdout, '');
+  assert.equal(existsSync(join(h.belay, 'pending.json')), false); // nothing queued for the permitted push
+
+  const reason = denyOf(gate(h, toolPayload({ tool_input: { command: 'git push --force origin main' } })));
+  assert.match(reason, /deferred under autonomous goal/);
+  assert.equal(readQueue(h).pending.length, 1);
+  assert.equal(readQueue(h).pending[0].class, 'git push');
 });
 
 test('corrupted keyoku files or non-JSON stdin → silent allow, exit 0', () => {

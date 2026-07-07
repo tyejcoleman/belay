@@ -7,12 +7,23 @@ import { keyokuSession } from './keyoku-client.mjs';
 // Loop lifecycle state: ~/.belay/loops.json (docs/DESIGN.md §3.1). Owner: agent B (round 1).
 //   { "loops": { "<goalId>": { "armed": true, "paused": false, "armed_at": <epoch>,
 //       "armed_by": "model"|"user"|"proposal:<id>", "session_id": "...", "cwd": "...",
-//       "note": "...", "paused_at": <epoch|null> } } }
+//       "note": "...", "paused_at": <epoch|null>, "autonomy"?: "L0"|"L1"|"L2" } } }
 // Single source of truth stays keyoku (goals.json + focus.json): belay stores ONLY what
-// keyoku has no concept of — armed-by provenance, pause, continuation counters. No goal
-// data is copied beyond the goalId key. Atomic tmp+rename 0700/0600 (util.mjs). Prune on
-// write: goal gone from goals.json, or converged >7d. Pause suspends the ROPE only — the
-// PreToolUse arrest never consults loops.json (ADR-12); gate.mjs is untouchable from here.
+// keyoku has no concept of — armed-by provenance, pause, continuation counters, and (B6/
+// ADR-28) the loop's declared autonomy level. No goal data is copied beyond the goalId
+// key. Atomic tmp+rename 0700/0600 (util.mjs). Prune on write: goal gone from goals.json,
+// or converged >7d. Pause suspends the ROPE only — the PreToolUse arrest never consults
+// loops.json for the STOP hold (ADR-12), but it DOES now read this file's `autonomy` field
+// to decide whether to permit an allowlisted outward action (B6) — gate.mjs is otherwise
+// untouchable from here (it never mutates loops.json).
+//
+// `autonomy` ('L0' default/conservative | 'L1' may push non-default branches | 'L2' may push
+// any branch incl. main) is a DIFFERENT axis from keyoku's own goal.autonomy field
+// ('autonomous'/'suggest'/'observe' — whether belay may act on the goal at all): this one only
+// narrows what an ALREADY-autonomous loop's fall-arrest gate permits outward, and only ever
+// widens permission for a small allowlisted set (git push, gh pr writes) — never for the
+// always-gated set (force pushes, publishes/releases, external sends, money, prod-destructive
+// ops), which stays staged at EVERY level (docs/DECISIONS.md ADR-28).
 
 const PRUNE_CONVERGED_SEC = 7 * 86400;
 const INLINE_PAYLOAD_CAP = 64 * 1024; // forwarded goal_create payload cap (DESIGN.md §9)
@@ -91,10 +102,12 @@ const refuse = (error) => ({ ok: false, error });
  *
  * @param {{ goal?: string, objective?: string, criteria?: object[], constraints?: string[],
  *          maxIterations?: number, confirm_autonomous?: boolean, scope?: 'session'|'global',
- *          session_id?: string, cwd?: string, proposal_id?: string }} args — belay_loop_create
- *          schema, verbatim. Default scope 'session' REQUIRES session_id (ADR-14) — auto-
- *          detected from $CLAUDE_CODE_SESSION_ID when omitted (ADR-26/B4); still refused
- *          if neither is present.
+ *          session_id?: string, cwd?: string, proposal_id?: string, autonomy?: 'L0'|'L1'|'L2' }}
+ *          args — belay_loop_create schema, verbatim. Default scope 'session' REQUIRES
+ *          session_id (ADR-14) — auto-detected from $CLAUDE_CODE_SESSION_ID when omitted
+ *          (ADR-26/B4); still refused if neither is present. `autonomy` (B6/ADR-28) is
+ *          optional — omitted means the loop carries no autonomy field at all, which the
+ *          PreToolUse gate treats as 'L0' (today's stage-everything behavior, unchanged).
  * @returns {Promise<object>} { ok:true, goal, status, next } | { ok:false, step, error }
  */
 /** Provably-unsatisfiable criterion pairs: two assertions on the SAME probe and path that
@@ -168,6 +181,21 @@ export async function loopCreate(args = {}) {
   if (scope === 'global' && sessionId) {
     return fail('scope', "scope:'global' and session_id are contradictory — omit session_id to hold the whole cwd subtree, or drop scope:'global' to pin the loop to that session");
   }
+
+  // 0b — autonomy (B6/ADR-28): the declared LOOP autonomy level ('L0' conservative default |
+  // 'L1' may push to non-default branches | 'L2' may push to any branch incl. main) that
+  // src/gate.mjs's PreToolUse fall-arrest reads to decide whether an allowlisted outward
+  // action (a plain, non-force git push; a gh pr write) is PERMITTED instead of staged.
+  // Optional and REFUSED-if-invalid (never silently coerced); omitted entirely → no field is
+  // written on the loops.json entry at all (see step 4 below), which is byte-identical to
+  // every loop created before this change — the gate treats a missing field as 'L0'
+  // (today's stage-everything behavior). This is a DIFFERENT axis from keyoku's own
+  // goal.autonomy ('autonomous'/'suggest'/'observe' — whether belay may act at all); this
+  // field only ever narrows what an ALREADY-autonomous loop's fall-arrest gate permits.
+  if (args.autonomy !== undefined && args.autonomy !== 'L0' && args.autonomy !== 'L1' && args.autonomy !== 'L2') {
+    return fail('autonomy_level', `autonomy must be one of 'L0'|'L1'|'L2' (got '${sanitizeSlug(String(args.autonomy), 24)}') — omit it to keep today's conservative default (everything outward is staged for human review)`);
+  }
+  const autonomyLevel = args.autonomy;
 
   // 1a/2 — everything refusable is refused BEFORE any spawn (a refusal must leave
   // keyoku byte-identical, and never costs a child).
@@ -289,6 +317,9 @@ export async function loopCreate(args = {}) {
       note: null,
       paused_at: null,
       proposal_id: proposalId,
+      // B6/ADR-28: field OMITTED entirely when not passed — a loop created without
+      // `autonomy` has NO key here, exactly like every loop created before this change.
+      ...(autonomyLevel !== undefined ? { autonomy: autonomyLevel } : {}),
     };
     writeLoopsState(state.loops);
   } catch (e) {
@@ -359,6 +390,7 @@ export async function loopCreate(args = {}) {
     ok: true,
     ...(countersReset ? {} : { counters_reset: false, degraded: 'state.json write failed — continuation counters were NOT reset; the loop is still live' }),
     ...(proposalId ? { proposal_id: proposalId, proposal_marked: proposalMarked } : {}),
+    ...(autonomyLevel !== undefined ? { autonomy: autonomyLevel } : {}),
   });
 
   // 5 — report: the same composition belay_status returns (best-effort — a compose

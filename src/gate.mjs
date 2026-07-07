@@ -5,6 +5,7 @@ import { readStdin, readConfig, toRegExp, capReason, sanitizeText, belayDir } fr
 import { readKeyoku, keyokuHome } from './keyoku.mjs';
 import { readBudget } from './budget.mjs';
 import { appendPending } from './pending.mjs';
+import { readLoops } from './loops.mjs';
 
 // PreToolUse policy gate (autonomy x budget x action-class). ONLY active while a
 // scope-matched focused AUTONOMOUS ACTIVE goal exists — belay never polices normal
@@ -319,6 +320,148 @@ export function classify(name, command, cwd, cfg) {
   return null;
 }
 
+// ── B6/ADR-28: loop-autonomy outward-action allowlist ──────────────────────────────────
+// A loop's declared `autonomy` (~/.belay/loops.json entry — 'L0' default/unset | 'L1' | 'L2',
+// set via belay_loop_create/`belay loop create --autonomy`, src/loops.mjs) lets the gate
+// PERMIT (a true silent allow — nothing staged, nothing queued) a NARROW allowlist of
+// otherwise-staged outward actions instead of deferring/asking. This is deliberately an
+// ALLOWLIST, not a denylist: every class NOT explicitly recognized below (npm publish,
+// control-file tampering, loop control, external send/publish, rm -rf, network write, the
+// config danger table, custom ask_patterns, and gh release/repo/api mutations) is untouched
+// by this section and falls straight through to the existing ask/defer path — AT EVERY
+// LEVEL, including L2. That is what keeps the always-gated invariant (docs/DECISIONS.md
+// ADR-28) true BY CONSTRUCTION rather than by an exclusion list this code would have to keep
+// in sync. Over-detection in every helper below is the SAFE direction (stays staged, never
+// permits) — "can't prove it's safe → treat as unsafe."
+//
+// Known, accepted interaction: when the OPT-IN stage-2 catch-mode (`slm_enabled`+`slm_catch`,
+// default OFF) is also on, a permitted action still reaches hookPreToolUse's catch-mode branch
+// (it sees "stage 1 found nothing to gate", same as any ungated command) and MAY be flagged by
+// the learned adjudicator anyway. This can only ADD friction, never remove it (catch-mode is
+// itself fail-safe-only per ADR-17 — an untrusted/broken daemon can at worst over-ask, never
+// fail open), so it is not a hole in the always-gated invariant; it is simply extra scrutiny
+// for operators who opted into both features at once.
+
+const GIT_PUSH_FORCE_FLAG = /^(?:-[a-zA-Z]*f[a-zA-Z]*|--force(?:-with-lease|-if-includes)?(?:=.*)?)$/i;
+const PROTECTED_PUSH_FLAG = /^--(?:all|mirror|branches)$/i;
+
+/** Strip a `src:dst` refspec / `refs/heads/` prefix / leading `+` down to a bare branch
+ *  name, then test it against main/master (case-insensitive). */
+function isProtectedRefspec(tok) {
+  const dst = tok.includes(':') ? tok.slice(tok.indexOf(':') + 1) : tok;
+  const name = dst.replace(/^\+/, '').replace(/^refs\/heads\//i, '');
+  return /^(?:main|master)$/i.test(name);
+}
+
+/**
+ * Inspect every `git push` invocation on the (already line-joined) command, wrapper-aware —
+ * reuses classifyVcs's own VCS_SCAN/nextSubcommand so it agrees with what classify() actually
+ * matched. Returns null when no push is found there (should not happen when hitClass is
+ * already 'git push', but never assumed); otherwise { forced, protectedTarget }:
+ *   - forced: true if ANY located invocation carries a force flag (-f, --force,
+ *     --force-with-lease[=...], --force-if-includes, or a short bundle containing an 'f') —
+ *     over-broad on purpose, since a false positive here only means "stays staged."
+ *   - protectedTarget: true if ANY located invocation could touch main/master, INCLUDING when
+ *     the target cannot be proven — a bare `git push` / `git push origin` names no branch, the
+ *     current branch could BE main, and that cannot be known from the command text alone, so
+ *     "unprovable" is treated as "protected" (fail-safe). `--all`/`--mirror`/`--branches` are
+ *     the same: broad/ambiguous targets are conservatively protected.
+ * Multiple chained pushes are ALL inspected — one qualifying invocation taints the whole line
+ * (same "one bad segment gates everything" principle as rmrfOutsideCwd/externalNetworkWrite).
+ */
+export function analyzeGitPush(command) {
+  if (typeof command !== 'string' || !command) return null;
+  VCS_SCAN.lastIndex = 0;
+  let m;
+  let found = false;
+  let forced = false;
+  let protectedTarget = false;
+  while ((m = VCS_SCAN.exec(command))) {
+    if (m[1].toLowerCase() !== 'git') continue;
+    const tok = m[2].trim().split(/\s+/).filter(Boolean);
+    const first = nextSubcommand(tok, 0, GIT_GLOBAL_ARG);
+    if (first.sub !== 'push') continue;
+    found = true;
+    const rest = tok.slice(first.idx + 1);
+    const flags = rest.filter((t) => t.startsWith('-'));
+    const nonFlags = rest.filter((t) => !t.startsWith('-'));
+    if (flags.some((f) => GIT_PUSH_FORCE_FLAG.test(f))) forced = true;
+    if (flags.some((f) => PROTECTED_PUSH_FLAG.test(f))) protectedTarget = true;
+    if (nonFlags.length < 2) {
+      protectedTarget = true; // no explicit branch/refspec given — cannot prove it isn't main
+    } else if (nonFlags.slice(1).some(isProtectedRefspec)) {
+      protectedTarget = true;
+    }
+  }
+  return found ? { forced, protectedTarget } : null;
+}
+
+/**
+ * True only when EVERY `gh` mutation found on the (already line-joined) command is a `gh pr`
+ * create/merge/edit/delete — false the moment a `gh release`/`gh repo`/`gh api` write is ALSO
+ * present anywhere on the same line (fail-safe: one disqualifying mutation stages the whole
+ * line, mirroring analyzeGitPush's "one bad segment taints everything").
+ */
+export function isGhPrOnlyWrite(command) {
+  if (typeof command !== 'string' || !command) return false;
+  VCS_SCAN.lastIndex = 0;
+  let m;
+  let sawPrWrite = false;
+  let sawOtherMutation = false;
+  while ((m = VCS_SCAN.exec(command))) {
+    if (m[1].toLowerCase() !== 'gh') continue;
+    const tok = m[2].trim().split(/\s+/).filter(Boolean);
+    const first = nextSubcommand(tok, 0, GH_GLOBAL_ARG);
+    if (first.sub === 'pr') {
+      const action = nextSubcommand(tok, first.idx + 1, GH_GLOBAL_ARG);
+      if (GH_MUTATION_ACTION.has(action.sub)) sawPrWrite = true;
+      continue;
+    }
+    if (GH_MUTATION_SUB.has(first.sub)) {
+      const action = nextSubcommand(tok, first.idx + 1, GH_GLOBAL_ARG);
+      if (GH_MUTATION_ACTION.has(action.sub)) sawOtherMutation = true;
+      continue;
+    }
+    if (first.sub === 'api') {
+      const tail = tok.join(' ');
+      if (GH_API_METHOD.test(` ${tail}`) || GH_API_FIELD.test(` ${tail}`)) sawOtherMutation = true;
+    }
+  }
+  return sawPrWrite && !sawOtherMutation;
+}
+
+/**
+ * Is this specific classified hit on the loop's declared-level outward allowlist? Pure.
+ * `level` is the loop's raw `autonomy` field (or null/anything else, e.g. absent/'L0') —
+ * only exactly 'L1' or 'L2' can ever permit anything; every other value (including undefined,
+ * null, 'L0', or a corrupt/unexpected string) falls through to `false` (stays staged),
+ * fail-safe by construction. Command is normalized the same way classify() does (shell
+ * line-continuations joined) so the scanners here see exactly what classify() saw.
+ */
+export function autonomyPermits(level, hitClass, command) {
+  if (level !== 'L1' && level !== 'L2') return false;
+  const cmd = typeof command === 'string' ? command.replace(/\\\r?\n/g, ' ') : command;
+  if (hitClass === 'git push') {
+    const gp = analyzeGitPush(cmd);
+    if (!gp || gp.forced) return false; // unparseable, or any force flag → never permit
+    return level === 'L2' ? true : !gp.protectedTarget; // L1: never main/master or unprovable
+  }
+  if (hitClass === 'gh mutation') {
+    return isGhPrOnlyWrite(cmd); // pr writes ONLY — repo/release/api stay staged at every level
+  }
+  return false; // everything else: unchanged at every level, including L2
+}
+
+/** The declared autonomy of the loop that owns `goalId` — 'L1'/'L2' only; anything else
+ *  (no loops.json entry, no `autonomy` field, or an unrecognized value) degrades to null,
+ *  which autonomyPermits treats as "stage everything" (today's behavior). Never throws
+ *  (readLoops() never throws — absent/malformed loops.json degrades to {loops:{}}). */
+export function loopAutonomy(goalId) {
+  if (typeof goalId !== 'string' || !goalId) return null;
+  const e = readLoops().loops[goalId];
+  return e && typeof e === 'object' && (e.autonomy === 'L1' || e.autonomy === 'L2') ? e.autonomy : null;
+}
+
 /** bypassPermissions sessions auto-resolve "ask" — the action runs with no prompt ever
  *  shown (observed live 2026-07-02: the gate emitted ask, `git push --dry-run` executed
  *  anyway). ADR-3's contract is "the question gets asked"; when the harness cannot ask,
@@ -359,6 +502,12 @@ export function decideGate(p, k, budget, cfg) {
 
   const hit = classify(name, command, p.cwd, cfg);
   if (hit) {
+    // B6/ADR-28: the FOCUSED loop's declared autonomy may PERMIT this specific hit — a true
+    // silent allow, bypassing gate_mode/bypassPermissions/queueing entirely. Checked first so
+    // a permitted action never gets staged even under gate_mode:'defer'. `k.goal` is present
+    // by the guard above; `loopAutonomy` reads belay's OWN loops.json (never keyoku's), the
+    // same store B3's session-ownership resolution uses.
+    if (autonomyPermits(loopAutonomy(k.goal.id), hit.class, command)) return null;
     // gate_mode 'defer' (ADR-16): deny-with-guidance instead of ask, so an unattended
     // loop is never stalled on a prompt nobody will answer — the action is queued (by the
     // hook wrapper, never here: this function stays pure) for ONE batched human review at

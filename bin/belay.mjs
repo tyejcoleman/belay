@@ -77,6 +77,7 @@ switch (cmd) {
           session_id: typeof f.session_id === 'string' ? f.session_id : undefined,
           cwd: typeof f.cwd === 'string' ? f.cwd : process.cwd(),
           proposal_id: typeof f.proposal_id === 'string' ? f.proposal_id : undefined,
+          autonomy: typeof f.autonomy === 'string' ? f.autonomy : undefined,
         })
       );
     } else if (sub === 'list') {
@@ -181,9 +182,16 @@ usage:
   belay loop create [--goal <slug|id>] [--objective <text> --criteria <json>]
                     [--constraints <json>] [--max-iterations <n>] [--confirm-autonomous]
                     [--session-id <id> | --scope global] [--cwd <dir>] [--proposal-id <id>]
+                    [--autonomy L0|L1|L2]
                                                    create-and-arm an autonomous convergence loop (writes via keyoku's own process;
                                                    session-scoped by default — --session-id required unless --scope global,
                                                    or auto-detected from $CLAUDE_CODE_SESSION_ID when omitted)
+                                                   --autonomy declares how far the PreToolUse fall-arrest gate may go
+                                                   WITHOUT staging for human review: default L0 stages every outward action
+                                                   (unchanged); L1 permits a plain, non-force git push to a non-default
+                                                   branch; L2 additionally permits pushing to main. Force pushes, npm
+                                                   publish/release, gh release, external sends, and spend are ALWAYS staged,
+                                                   at every level (docs/DECISIONS.md ADR-28)
   belay loop list                                  loop-relevant goals × arm/pause state × counters
   belay loop pause <goal> [--note <text>]          pause the Stop-hook hold (the fall-arrest gate stays active)
   belay loop resume <goal>                         resume a paused loop (re-demands fresh goal_assess)

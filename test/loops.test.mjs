@@ -282,6 +282,35 @@ test('loop create (inline): goal created autonomous via keyoku child, focused to
   assert.match(stop.reason, /tests green/);
 });
 
+// ── B6/ADR-28: declared loop autonomy stored on the loops.json entry ───────────────────
+
+test('loop create: --autonomy L2 lands on the loops.json entry; omitted → no autonomy key at all (byte-identical to pre-B6 loops)', () => {
+  const h = homes();
+  writeClaudeJson(h);
+  const withLevel = JSON.parse(run(h, ['loop', 'create', '--objective', 'ship it', '--criteria', CRITERIA, '--session-id', 's1', '--cwd', '/tmp/proj', '--autonomy', 'L2']).stdout);
+  assert.equal(withLevel.ok, true, JSON.stringify(withLevel));
+  assert.equal(readLoopsFile(h).loops[withLevel.goal.id].autonomy, 'L2');
+  assert.equal(withLevel.steps.find((s) => s.step === 'arm').autonomy, 'L2');
+
+  const h2 = homes();
+  writeClaudeJson(h2);
+  const noLevel = JSON.parse(run(h2, ['loop', 'create', '--objective', 'ship it too', '--criteria', CRITERIA, '--session-id', 's1', '--cwd', '/tmp/proj']).stdout);
+  assert.equal(noLevel.ok, true, JSON.stringify(noLevel));
+  const entry = readLoopsFile(h2).loops[noLevel.goal.id];
+  assert.equal(Object.prototype.hasOwnProperty.call(entry, 'autonomy'), false); // field OMITTED, not defaulted to 'L0'
+});
+
+test('loop create: an invalid --autonomy value is refused pre-spawn, keyoku and belay both untouched', () => {
+  const h = homes();
+  writeClaudeJson(h);
+  const out = JSON.parse(run(h, ['loop', 'create', '--objective', 'x', '--criteria', CRITERIA, '--session-id', 's1', '--autonomy', 'L9']).stdout);
+  assert.equal(out.ok, false);
+  assert.equal(out.step, 'autonomy_level');
+  assert.match(out.error, /'L0'\|'L1'\|'L2'/);
+  assert.equal(existsSync(join(h.keyoku, 'goals.json')), false); // refused BEFORE any spawn
+  assert.equal(existsSync(join(h.belay, 'loops.json')), false);
+});
+
 test('loop create (inline): keyoku’s own validation refusal returns verbatim as {ok:false, step:create}; nothing armed', async () => {
   const h = homes();
   writeClaudeJson(h);

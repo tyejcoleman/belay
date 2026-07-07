@@ -58,14 +58,28 @@ fix/status. Goal `belay-handles-any-loop` drives these to resolution using the l
   `additionalContext`, a weaker mechanism that risks continuation). Not belay-controllable. Mitigated
   by rewording belay's message to `[belay ⟳ steering]`. Product feedback for Anthropic.
 
-- [B6] **Autonomy-level ↔ PreToolUse gate not wired** — STATUS: **NEW** (found live via dogfooding)
+- [B6] **Autonomy-level ↔ PreToolUse gate not wired** — STATUS: **DONE** (ADR-28)
   loop-setup declares a run's autonomy level (L0/L1/L2 + allowlist) in the LEDGER, but belay's
   PreToolUse fall-arrest gate (`belay.mjs hook pre-tool-use`) independently defers outward actions
   regardless of that level. Observed: under an agreed **L2 (may push)** run, a committed B1 fix's
   `git push` was still deferred — *"queued for batched human approval at convergence (gate_mode:
-  defer)."* Safe default, but for "belay handles any loop" the declared autonomy/allowlist must FLOW
-  INTO belay's gate policy (gate reads the loop's level → permits allowlisted actions, stages the
-  rest) so an L2 run isn't silently downgraded. Until then, staged pushes await batched approval.
+  defer)."* **Fix (ADR-28):** a belay loop may now DECLARE `autonomy: 'L0'|'L1'|'L2'`
+  (`belay_loop_create`/`belay loop create --autonomy`, stored on its `loops.json` entry, omitted
+  by default — byte-identical to every loop that existed before this change). `src/gate.mjs` reads
+  the focused loop's declared level (`loopAutonomy`, via the same `loops.json` B3/ADR-25 already
+  reads) and, for L1/L2 ONLY, PERMITS a narrow, explicitly enumerated ALLOWLIST instead of
+  staging: a plain (non-force) `git push` to a non-default branch (L1) or to any branch incl.
+  main (L2), and a pure `gh pr` create/merge/edit/delete (both levels). This is an ALLOWLIST, not
+  a denylist, so the always-gated set — force pushes, `npm publish`, `gh release`/`repo`/`api`
+  writes, external sends, prod-destructive ops, anything that spends money — is safe BY
+  CONSTRUCTION: every class not on the allowlist falls straight through to today's ask/defer path
+  at every level, including L2. Classification is fail-safe throughout (ambiguous targets, chained
+  commands, and unrecognized `autonomy` values all degrade to "stays staged"). Proof in
+  `test/gate.test.mjs` (L2 permits a plain push incl. main; force push / npm publish / gh
+  release/repo/api still gated at L2; L0/no-field byte-identical to today; L1 refuses main/master
+  and unprovable targets; mixed-mutation and chained commands stay conservative) and
+  `test/loops.test.mjs` (`--autonomy` stored/omitted, invalid value refused pre-spawn). 269 prior
+  + 7 = 276 green.
 
 - [B7] **Forced continuations while background work is in-flight (EFFICIENCY)** — STATUS: **DONE** (ADR-24)
   When the facilitator dispatches a background sub-agent/Workflow and then stops, belay's Stop hook

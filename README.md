@@ -185,6 +185,13 @@ convergence, focus scope). Belay stores only what keyoku has no concept of, in
 - **Bounded, always** (ADR-6) — every loop ends at convergence, keyoku's iteration
   budget, the budget floor, or belay's own `max_continuations` cap, whichever comes
   first.
+- **Declared autonomy** (`autonomy: 'L0'|'L1'|'L2'`, ADR-28) — optional, omitted by
+  default (today's behavior: every outward action is staged for human review). `L1`
+  lets the PreToolUse gate PERMIT a plain, non-force `git push` to a non-default branch
+  and a `gh pr` create/merge/edit/delete; `L2` additionally permits pushing to
+  `main`/`master`. A fixed set is **never** permitted at any level — force pushes,
+  `npm publish`, `gh release`/`repo`/`api` writes, external sends, and anything that
+  spends money always stay staged.
 
 ### Proposals — self-proposed, never self-armed (ADR-11)
 
@@ -387,7 +394,11 @@ belay mcp         # stdio MCP server (belay_status, belay_loop_*, belay_propose)
 belay loop create [--goal <slug|id>] [--objective <text> --criteria <json>]
                   [--constraints <json>] [--max-iterations <n>] [--confirm-autonomous]
                   [--session-id <id> | --scope global] [--cwd <dir>] [--proposal-id <id>]
+                  [--autonomy L0|L1|L2]
                   # session-scoped by default (ADR-14): --session-id required unless --scope global
+                  # --autonomy (ADR-28, omitted = today's stage-everything default): L1 permits a
+                  # plain git push to a non-default branch + gh pr writes; L2 also permits main.
+                  # Force pushes / npm publish / gh release / external sends always stay staged.
 belay loop list                            loop-relevant goals × arm/pause state × counters
 belay loop pause <goal> [--note <text>]    pause the Stop hold (the fall-arrest gate stays active)
 belay loop resume <goal>                   resume (re-demands a fresh goal_assess)

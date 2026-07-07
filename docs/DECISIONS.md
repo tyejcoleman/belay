@@ -851,6 +851,94 @@ thrashing blocks so it's not a one-shot), and a non-milestone goal at the identi
 gets the original escalating warning verbatim (asserts the exact old wording, and that the new
 milestone wording is ABSENT). 267 prior + 2 = 269 green.
 
+## ADR-28 — loop autonomy (L0/L1/L2) is wired into the PreToolUse gate as a narrow, constructive ALLOWLIST (B6) *(2026-07-07)*
+
+**Decision:** A belay loop may now declare an `autonomy` level — `'L0'` (default/unset,
+conservative), `'L1'`, or `'L2'` — via `belay_loop_create`/`belay loop create --autonomy`
+(`src/loops.mjs loopCreate`), stored on its `~/.belay/loops.json` entry (`autonomy?: 'L0'|'L1'|'L2'`).
+**Omitted entirely by default:** a loop created without `autonomy` gets NO key at all on its
+entry — byte-identical to every loop created before this change. `src/gate.mjs`'s PreToolUse
+fall-arrest now reads the FOCUSED loop's declared level (`loopAutonomy(k.goal.id)`, via
+`readLoops()` — the same `~/.belay/loops.json` store B3/ADR-25's session-ownership resolution
+reads) and, for `'L1'`/`'L2'` ONLY, may PERMIT (a true silent allow — nothing staged, nothing
+queued, no ask) a **narrow, explicitly enumerated allowlist** of otherwise-gated outward
+actions instead of deferring/asking:
+
+- **L1:** a plain (non-force) `git push` to a branch OTHER than `main`/`master`.
+- **L2:** additionally, a plain (non-force) `git push` to ANY branch, including `main`/`master`.
+- **Both L1 and L2:** a `gh pr` `create`/`merge`/`edit`/`delete` (a pure PR write — see the
+  always-gated list below for what this explicitly EXCLUDES).
+
+**The always-gated invariant — NEVER permitted, at ANY level, including L2:** force pushes
+(`--force`/`-f`/`--force-with-lease`/`--force-if-includes`, or any short flag bundle containing
+`f`), `npm publish`, `gh release` (create/edit/delete), `gh repo` writes, any non-GET/field-taking
+`gh api` call, prod-destructive operations (a DB drop/truncate/migration — already unclassified-
+by-default in this codebase and thus already gated by any config the operator adds for it; this
+ADR does not loosen it), external sends as the user (email/Slack/social — the existing
+`external send/publish` class), and anything that spends money. **Design choice, not an
+oversight:** the permit logic is an ALLOWLIST (`autonomyPermits`), not a denylist — every class
+not explicitly recognized (`npm publish`, `control-file tampering`, `loop control`,
+`external send/publish`, `rm -rf outside cwd`, `network write`, the config danger table, custom
+`ask_patterns`, and `gh mutation` hits that are NOT a pure `pr` write) falls straight through to
+the pre-existing ask/defer path, UNCHANGED, at every level. This makes the always-gated set safe
+BY CONSTRUCTION — there is no enumerable exclusion list for future code to fall out of sync with.
+
+**Fail-safe classification (be conservative when unsure):**
+- `analyzeGitPush` treats ANY force-flag spelling (including a short bundle merely containing
+  `f`) as force — over-detection only ever means "stays staged," never "wrongly permitted."
+- A push whose target cannot be PROVEN to avoid `main`/`master` — a bare `git push`, `git push
+  <remote>` with no explicit branch, or `--all`/`--mirror`/`--branches` — is treated as
+  "possibly main" (`protectedTarget: true`), which L1 refuses to permit (L2 doesn't care, since
+  it already covers main). A `src:dst` refspec, `refs/heads/` prefix, or leading `+` is
+  normalized before the main/master check so `HEAD:master` or `+feature:main` are still caught.
+- A chained command line (`git push a && git push -f b`, `gh pr merge 1 && gh release create v1`)
+  is scanned in FULL: one disqualifying segment (a force push anywhere, a non-pr gh mutation
+  anywhere) taints the WHOLE line back to staged — mirroring the existing `rmrfOutsideCwd`/
+  `externalNetworkWrite` "one bad segment gates everything" principle.
+- An unparseable/unrecognized `autonomy` value on the loop entry (anything other than exactly
+  `'L1'`/`'L2'`, including a corrupt string, `null`, or absent) degrades to `null` →
+  `autonomyPermits` returns `false` → stays staged. `loopCreate` itself REFUSES an invalid
+  `autonomy` argument pre-spawn (mirrors the existing `scope` validation) rather than silently
+  coercing it.
+
+**Ordering (gate_mode/bypassPermissions/queueing never apply to a permit):** the autonomy check
+runs FIRST, immediately after `classify()` finds a hit, before the `gate_mode:'defer'` branch and
+before `escalateForBypass` — so a permitted action is `return null` (nothing staged) under
+`gate_mode:'ask'`, `gate_mode:'defer'`, and even `permission_mode:'bypassPermissions'` alike; it
+never reaches the pending-approval queue.
+
+**Known, accepted, documented interaction (not a hole):** if an operator ALSO opts into the
+experimental stage-2 catch-mode (`slm_enabled`+`slm_catch`, default OFF, ADR-17 ext), a permitted
+action still reaches `hookPreToolUse`'s "stage 1 found nothing to gate" catch-mode branch and MAY
+be additionally flagged by the learned adjudicator. This can only ADD friction (catch-mode is
+itself fail-safe-only — an untrusted/broken daemon over-asks, never fails open), so it does not
+weaken the always-gated invariant; it is simply extra scrutiny for an operator who combined two
+opt-in features. The refine-mode branch (`else if` on a truthy `d`) never runs at all for a
+permitted action, since a permit makes `decideGate` return `null`.
+
+**Backward-compat (constraint 1):** a loop with no `autonomy` field — every loop that existed
+before this change, and every new loop created without the argument — behaves EXACTLY as today:
+`loopAutonomy` returns `null`, `autonomyPermits` returns `false` unconditionally, so `hit` always
+falls through to the pre-existing `gate_mode`/`ask`/`escalateForBypass` path, verbatim. Proven
+byte-for-byte identical in `test/gate.test.mjs` (no loops.json entry vs an explicit `autonomy:'L0'`
+entry produce IDENTICAL stdout for the same `git push`).
+
+**Never-crash (ADR-4):** `loopAutonomy` never throws (`readLoops()` degrades any absent/malformed
+`loops.json` to `{loops:{}}`); `autonomyPermits`/`analyzeGitPush`/`isGhPrOnlyWrite` are pure string
+scans over already-validated input with the same defensive `typeof`/emptiness guards as the
+existing `classify()` family, and any unexpected shape degrades to `false`/`null` (stays staged),
+never to a permit.
+
+**Files:** `src/loops.mjs` (`autonomy` argument validation + storage — refuses pre-spawn like
+`scope`, field omitted when not passed), `bin/belay.mjs` (`--autonomy` CLI flag + help text),
+`src/mcp.mjs` (`belay_loop_create` schema gains the `autonomy` enum property), `src/gate.mjs`
+(`loopAutonomy`, `autonomyPermits`, `analyzeGitPush`, `isGhPrOnlyWrite`, and the one new check
+inside `decideGate`). Proof in `test/gate.test.mjs` (5 new tests: the L2 plain-push permit +
+always-gated-set-still-gated, the L0/no-field byte-identity, the L1 main/master and
+unprovable-target refusals, the fail-safe mixed-mutation/chained-command cases, and the
+`gate_mode:'defer'` interaction) and `test/loops.test.mjs` (2 new tests: `--autonomy` stored vs
+omitted, invalid value refused pre-spawn). 269 prior + 5 + 2 = 276 total, `# fail 0`.
+
 ## Non-ADR notes
 
 - **Compliance line (from the mission):** official surfaces only — Stop and PreToolUse
