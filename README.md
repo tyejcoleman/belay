@@ -90,7 +90,12 @@ like a harness-of-harnesses** — every surface is an official one:
   lives: `goal_assess` is keyoku's; `fit_check`/`handoff` are tokenroom's; belay
   composes, it doesn't proxy.
 - **The statusline shows.** tokenroom's HUD carries the budget countdowns and reset
-  clocks the loop's descent decisions are made from.
+  clocks the loop's descent decisions are made from, and `belay statusline` (ADR-30) adds
+  a persistent one-line `⟳ loop <slug>` / `⏸ loop <slug>` indicator whenever THIS session
+  owns an armed loop — nothing extra renders when it doesn't. It's a separate command (belay
+  never edits `settings.json` for you); combine it with an existing statusLine command via a
+  tiny shell wrapper that feeds the same stdin JSON to both — see `docs/DECISIONS.md` ADR-30
+  for the exact snippet.
 - **Schedules wake.** You (the user) arm official scheduled routines — `/schedule`, or
   your own cron that opens a session. When the session starts, belay's proposals are
   waiting in context; the model arms what's in scope with an explicit

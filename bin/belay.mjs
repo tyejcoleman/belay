@@ -167,6 +167,19 @@ switch (cmd) {
   case 'selftest':
     (await import('../src/selftest.mjs')).selftestCommand();
     break;
+  case 'statusline': {
+    // A Claude Code statusLine command (docs/DECISIONS.md ADR-30): runs on every UI
+    // refresh, so this must never crash and never hang — belay's own choke-point discipline
+    // (the `hook` case above) applies here too, even though src/statusline.mjs already
+    // guards itself end-to-end. No trailing newline: composes cleanly with a sibling
+    // statusline segment (e.g. tokenroom `tap`) in a wrapper command.
+    try {
+      process.stdout.write(await (await import('../src/statusline.mjs')).statusline());
+    } catch {
+      // never crash a statusline — print nothing
+    }
+    break;
+  }
   default:
     console.log(`belay — always-on goal loop for Claude Code (reads Keyoku goals + tokenroom budget)
 
@@ -177,6 +190,10 @@ usage:
   belay status                                     current focused goal + would-block verdict + counters
   belay insights [--json]                          how belay is ACTUALLY behaving in production (mines its own decision journal + retros)
   belay selftest                                   canary: prove the enforcement path blocks/arrests on THIS install + the live harness is firing the hooks
+  belay statusline                                 PERSISTENT one-line "loop mode" indicator for a Claude Code statusLine command: reads
+                                                   the stdin JSON's session_id (else $CLAUDE_CODE_SESSION_ID), prints '⟳ loop <slug>'
+                                                   (or '⏸ loop <slug>' if paused, '⟳ loop ×N' for N>1) when THIS session owns an armed
+                                                   loop, else prints nothing; never crashes, read-only, no network/spawn
   belay doctor                                     full-stack health + keyoku layout self-check, tokenroom presence, hook registration, config validity
   belay mcp                                        stdio MCP server (belay_status, belay_loop_*, belay_propose) — registered by install
   belay loop create [--goal <slug|id>] [--objective <text> --criteria <json>]

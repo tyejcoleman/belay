@@ -996,6 +996,75 @@ common case where one is present.
 no-crash, iterations-exhausted duration, `fmtDuration` unit boundaries) plus the 4 pre-existing
 test files above widened to tolerate the new clause. 276 prior + 4 = 280 total, `# fail 0`.
 
+## ADR-30 — `belay statusline`: a persistent "loop mode" indicator *(2026-07-07)*
+
+**Decision:** New subcommand `belay statusline` (`bin/belay.mjs`, dispatched like every other
+verb) meant to be registered as (part of) a Claude Code `statusLine` command — the ONE surface
+that renders on every UI refresh, so a session in an armed belay loop has a persistent visual
+cue instead of having to run `belay status` by hand. Implementation lives in a new
+`src/statusline.mjs`, keeping `bin/belay.mjs`'s dispatch-only discipline intact.
+
+Resolution mirrors the two official inputs a statusLine command gets: the JSON payload Claude
+Code pipes to stdin (`{session_id, cwd, model, …}`, same shape as a hook payload) — its
+`session_id` wins — else `$CLAUDE_CODE_SESSION_ID` from the environment. Ownership reuses the
+B3/ADR-25 predicate (`sessionOwnedGoalIds`/`ownedActiveUnits` in `src/keyoku.mjs`/`src/stop.mjs`):
+a loops.json entry with `session_id` pinned to this session, `armed:true`, whose keyoku goal row
+is `status:'active'` — except it does NOT drop `paused:true` entries (B3 excludes them because a
+paused loop cannot hold a Stop; this command instead renders them distinctly, `⏸` vs `⟳`, so a
+paused loop isn't silently invisible in the statusline). Everything read-only: loops.json,
+goals.json, and — only for a non-paused unit, and only the already-written tail line — the
+observation `.jsonl` (`tailObservation`, existing; no probe is ever run — ADR-1).
+
+**Output contract:** 0 owned units → `''` (nothing extra shown when not in loop mode); exactly
+one ACTIVE unit → `⟳ loop <slug>` (+ ` <met>/<total>` appended only when the latest observation
+tail cheaply supplies both `criteria.length` and `unmet.length` — never invented, ADR-4); N>1
+active → the compact `⟳ loop ×N` (statuslines are cramped; a growing portfolio must stay O(1)
+width, not list-and-truncate); all-paused collapses the same way to `⏸ loop <slug>` / `⏸ loop
+×N`; a MIX of active and paused leads with the active `⟳` summary and appends a short `
+(+K⏸)` suffix so a paused sibling is never silently dropped from view. Slugs are run through the
+existing `sanitizeSlug` (util.mjs) at a tighter 24-char cap than its 64-char default for
+model-visible reasons — this text renders in a terminal-adjacent UI, not model context, but the
+same untrusted-goal-data hygiene applies. No trailing newline (`process.stdout.write`, not
+`console.log`) so it composes cleanly as one segment of a larger statusLine command.
+
+**Never-crash (ADR-4), same posture as the `hook` dispatch:** `src/statusline.mjs`'s `statusline()`
+wraps its entire body in try/catch → `''` on ANY failure (malformed/absent stdin, unreadable or
+corrupted loops.json/goals.json/observation file, a keyoku layout change), and every internal
+helper (`ownedLoopsForStatusline`) is independently guarded the same way. `bin/belay.mjs`'s new
+`case 'statusline'` wraps the call in its own try/catch too (belt-and-suspenders — the module
+already can't throw, but a statusLine command must never be the one thing that breaks the UI).
+Read-only, no network, no spawn — a statusline command runs on every refresh, at hook-adjacent
+latency (loops.json + goals.json + at most one observation tail: 2-3 file reads).
+
+**Why reuse B3's predicate instead of a fresh query:** the SAME "which loops does this session
+own" question the Stop hook already answers (`decidePortfolio`'s `ownedActiveUnits`) is exactly
+what the statusline should show — it must never claim a session is "in loop mode" for a loop the
+Stop hook would NOT actually hold it on (e.g. a `scope:'global'` loop with no `session_id`, or a
+different session's loop under a global focus.json). Reusing the identical filter keeps the
+statusline and the enforcement path from ever drifting apart; a fresh, looser query risked
+showing `⟳` for a loop that in fact cannot hold this session's stop.
+
+**settings.json wiring (staged — NOT written by this change):** belay never edits
+`~/.claude/settings.json` (the orchestrator/user wires that). To combine with an existing
+`tokenroom tap` statusline on one line, a tiny POSIX-shell wrapper captures stdin ONCE (both
+commands need the same JSON) and prints belay's segment first (so loop-mode is the most
+prominent thing), space-separated, cleanly omitted when belay's segment is empty:
+```
+J=$(cat); B=$(printf '%s' "$J" | "<node>" "<belay-repo>/bin/belay.mjs" statusline 2>/dev/null); T=$(printf '%s' "$J" | "<node>" "<tokenroom-repo>/bin/tokenroom.mjs" tap 2>/dev/null); if [ -n "$B" ]; then printf '%s  %s' "$B" "$T"; else printf '%s' "$T"; fi
+```
+Verified end-to-end against the real `belay` and `tokenroom` binaries (both orderings: a
+loop-owning session renders `⟳ loop <slug>  <tokenroom HUD>`; a non-owning session renders just
+the tokenroom HUD, belay's segment cleanly absent).
+
+**Files:** `src/statusline.mjs` (new — `statusline`, `renderStatusline`, `ownedLoopsForStatusline`,
+`resolveSessionId`, all exported for direct unit testing), `bin/belay.mjs` (`case 'statusline'`
+dispatch + help text). Proof: `test/statusline.test.mjs` (12 new tests: single active loop with
+no/with a fresh observation, no owned loop via mismatched session_id / absent loops.json,
+paused-loop form, N>1 active, mixed active+paused, a non-`active` goal row excluded even though
+armed, missing session_id from both stdin and env, garbage non-JSON stdin, corrupted loops.json,
+keyoku home entirely absent — every case asserts both the stdout content AND exit code 0/empty
+stderr). 280 prior + 12 = 292 total, `# fail 0`.
+
 ## Non-ADR notes
 
 - **Compliance line (from the mission):** official surfaces only — Stop and PreToolUse
