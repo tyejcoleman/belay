@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { belayDir, tokenroomDir, readJSON, readConfig, ensureDir, atomicWriteJSON, sanitizeText, sanitizeSlug, toEpochSec } from './util.mjs';
+import { belayDir, tokenroomDir, readJSON, readConfig, ensureDir, atomicWriteJSON, sanitizeText, sanitizeSlug, toEpochSec, projectKeyForCwd, projectMatches } from './util.mjs';
 import { keyokuHome, tailObservation, unmetDetail } from './keyoku.mjs';
 import { readBudget } from './budget.mjs';
 import { readLoops } from './loops.mjs';
@@ -77,19 +77,32 @@ function scanResume(now) {
 }
 
 /** S2 + S3 — one goals.json pass: unfocused active autonomous goals (armable) and
- *  stale-converged goals (re-assess candidates; a DIRECT goal_assess, never a loop). */
-function scanGoals(now, cfg) {
+ *  stale-converged goals (re-assess candidates; a DIRECT goal_assess, never a loop).
+ *  `sessionProject` (ADR-33, the project key derived from the CALLER's cwd — null when the
+ *  caller passed no cwd, e.g. an older caller or one that never wired it through) scopes S2
+ *  ONLY: an unfocused-autonomous goal whose loops.json entry carries a `project` that does
+ *  NOT match (same key, or this session's project nested inside it — ADR-5-style subtree)
+ *  is skipped — the "~60 cross-project proposals" leak. A goal with NO loops.json entry, or
+ *  whose entry has no `project` field (never armed via belay, or armed before ADR-33), or a
+ *  null `sessionProject` (no cwd known) ALWAYS falls back to today's behavior — surfaced,
+ *  never hidden (never hide a legacy loop on unprovable evidence, mirrors ADR-4's "absent
+ *  data never denies" posture). S3 (stale-converged, an advisory re-assess suggestion, not a
+ *  loop) is deliberately left unscoped — out of scope for this pass. */
+function scanGoals(now, cfg, sessionProject = null) {
   const home = keyokuHome();
   const source = join(home, 'goals.json');
   const goals = readJSON(source);
   if (!Array.isArray(goals)) return [];
   const focus = readJSON(join(home, 'focus.json'));
   const focusedId = focus && typeof focus === 'object' && typeof focus.goalId === 'string' ? focus.goalId : null;
+  const loopsMap = readLoops().loops;
   const out = [];
   for (const g of goals) {
     if (!g || typeof g !== 'object' || typeof g.id !== 'string' || !g.id) continue;
     const slug = sanitizeSlug(typeof g.slug === 'string' && g.slug ? g.slug : g.id); // model-visible + create ref (ADR-7)
     if (g.status === 'active' && g.autonomy === 'autonomous' && g.id !== focusedId) {
+      const loopProject = loopsMap[g.id]?.project;
+      if (sessionProject && typeof loopProject === 'string' && loopProject && !projectMatches(sessionProject, loopProject)) continue; // ADR-33: a different project's loop — not this session's business
       const used = num(g.usedIterations);
       const max = num(g.maxIterations);
       const unmet = unmetDetail(g, tailObservation(join(home, 'observations', `${g.id}.jsonl`)));
@@ -219,18 +232,21 @@ function budgetFresh(now) {
  * Read-only over keyoku/tokenroom files; writes only ~/.belay/proposals.json. Never
  * throws on absent/malformed inputs (ADR-4) — a bad source file just yields no signal.
  * Master switch: cfg.proposals_enabled (false → { proposals: [] }, no writes).
- * @param {{ nowSec?: number }} [opts] injectable clock for tests
+ * @param {{ nowSec?: number, cwd?: string }} [opts] injectable clock for tests; `cwd`
+ *   (ADR-33, additive/optional) scopes the S2 unfocused-autonomous signal to THIS caller's
+ *   project — omitted/non-string → today's unscoped behavior (backward-compat).
  * @returns {{ proposals: object[] }}
  */
-export function scan({ nowSec: now = Date.now() / 1000 } = {}) {
+export function scan({ nowSec: now = Date.now() / 1000, cwd } = {}) {
   try {
     const { cfg } = readConfig();
     if (!cfg.proposals_enabled) return { proposals: [] };
+    const sessionProject = typeof cwd === 'string' && cwd ? projectKeyForCwd(cwd) : null;
 
     const fresh = [];
     const s1 = scanResume(now);
     if (s1) fresh.push(s1);
-    fresh.push(...scanGoals(now, cfg));
+    fresh.push(...scanGoals(now, cfg, sessionProject));
     fresh.push(...scanRipe(now));
     fresh.push(...scanOrphanedLoops(now));
 

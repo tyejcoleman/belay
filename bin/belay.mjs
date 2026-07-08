@@ -136,7 +136,9 @@ switch (cmd) {
     const f = parseFlags(argv);
     const propose = await import('../src/propose.mjs');
     if (typeof f.dismiss === 'string' && f.dismiss) printJSON(propose.dismiss(f.dismiss));
-    else printJSON(propose.scan());
+    // ADR-33: default cwd to the CLI's own invocation directory so project-scoped filtering
+    // is active by default; --cwd overrides (mirrors `belay loop create --cwd`).
+    else printJSON(propose.scan({ cwd: typeof f.cwd === 'string' ? f.cwd : process.cwd() }));
     break;
   }
   case 'pending':
@@ -237,7 +239,7 @@ usage:
                                                    criteria added/removed, new/removed owned goals. Read-only on keyoku;
                                                    updates belay's own snapshot on every read. Reporting only — never
                                                    loosens the PreToolUse gate on goal-abandon/pause (see ADR-32)
-  belay propose [--dismiss <id>]                   scan for loop-worthy signals; proposals are advisory, never auto-armed
+  belay propose [--dismiss <id>] [--cwd <dir>]     scan for loop-worthy signals (project-scoped to --cwd, default this dir); proposals are advisory, never auto-armed
   belay pending [--clear | --remove <id>]          review actions deferred by gate_mode 'defer' (denied + queued for batched approval)
   belay hook <stop|pre-tool-use|session-start>     (hook commands — wired by install)
 

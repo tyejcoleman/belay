@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { readJSON, readConfig, fmtClock, belayDir, sanitizeText } from './util.mjs';
+import { readJSON, readConfig, fmtClock, belayDir, sanitizeText, projectKeyForCwd, projectMatches } from './util.mjs';
 import { keyokuHome, readKeyoku, goalSlug, unmetDetail } from './keyoku.mjs';
 import { readBudget } from './budget.mjs';
 import { readOwnState, resolveEntry } from './state.mjs';
@@ -9,10 +9,28 @@ import { pendingSummary } from './pending.mjs';
 import { computeMutations, mutationCount } from './mutations.mjs';
 
 /** Open-proposal count straight from proposals.json (ADR-9 posture: a count, never copies;
- *  absent/malformed → 0). `belay propose` / belay_propose carry the full evidence. */
-function openProposalCount() {
+ *  absent/malformed → 0). PROJECT-SCOPED (ADR-33): an 'unfocused-autonomous' row whose
+ *  underlying goal's loops.json entry carries a `project` that does not match `cwd`'s own
+ *  derived project is excluded — mirrors propose.mjs `scanGoals`'s S2 filter, applied here to
+ *  the ALREADY-PERSISTED rows (a raw file read, unlike `belay propose`'s live `scan()` — this
+ *  keeps reporting whatever the last scan/proposal persisted, exactly like before this
+ *  change, just narrowed to this project). Every other kind is left untouched (out of scope
+ *  for this pass, matches propose.mjs). No goalId / no loops.json project field on that goal →
+ *  never excluded (never hide on unprovable evidence). `cwd` omitted/malformed → unscoped
+ *  (today's behavior). */
+function openProposalCount(cwd) {
   const p = readJSON(join(belayDir(), 'proposals.json'));
-  return Array.isArray(p?.proposals) ? p.proposals.filter((x) => x && typeof x === 'object' && x.status === 'open').length : 0;
+  const rows = Array.isArray(p?.proposals) ? p.proposals.filter((x) => x && typeof x === 'object' && x.status === 'open') : [];
+  const sessionProject = typeof cwd === 'string' && cwd ? projectKeyForCwd(cwd) : null;
+  if (!sessionProject) return rows.length;
+  const loopsMap = readLoops().loops;
+  return rows.filter((r) => {
+    if (r.kind !== 'unfocused-autonomous') return true;
+    const goalId = typeof r.evidence?.goalId === 'string' ? r.evidence.goalId : null;
+    const loopProject = goalId ? loopsMap[goalId]?.project : null;
+    if (typeof loopProject !== 'string' || !loopProject) return true; // no project field → never hidden
+    return projectMatches(sessionProject, loopProject);
+  }).length;
 }
 
 /** `belay status` — current focused goal + the would-block verdict + counters, plus the
@@ -40,7 +58,7 @@ export function status() {
   // `belay status` run from inside a live Claude Code session still gets a mutations line.
   const mutSessionId = payload.session_id !== 'status-probe' ? payload.session_id : typeof process.env.CLAUDE_CODE_SESSION_ID === 'string' && process.env.CLAUDE_CODE_SESSION_ID ? process.env.CLAUDE_CODE_SESSION_ID : null;
   const proposalsLine = () => {
-    const n = openProposalCount();
+    const n = openProposalCount(payload.cwd);
     console.log(`  proposals: ${n} open${n ? ' — `belay propose` for evidence + ready-to-arm args (never auto-armed)' : ''}`);
     // ADR-16: deferred-action queue (presentation metadata only — no decision reads it).
     const pend = pendingSummary();

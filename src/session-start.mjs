@@ -57,7 +57,10 @@ export async function hookSessionStart() {
     // (2) Proposals — the morning briefing of loop-worthy work elsewhere (advisory, never armed).
     let proposalsLine = null;
     if (cfg.proposals_enabled) {
-      const open = scan().proposals.filter((p) => p && typeof p === 'object' && p.status === 'open');
+      // ADR-33: scope the S2 unfocused-autonomous signal to THIS session's project (payload.cwd,
+      // the same field buildLoopBriefing above already reads) — a goal armed under an unrelated
+      // project's cwd stops leaking into this session's morning briefing.
+      const open = scan({ cwd: typeof payload.cwd === 'string' ? payload.cwd : undefined }).proposals.filter((p) => p && typeof p === 'object' && p.status === 'open');
       const top = open.slice(0, cfg.proposal_max_surfaced);
       if (top.length > 0) {
         const items = top.map((p, i) => sanitizeText(`(${i + 1}) ${p.kind} [${p.id}]: ${p.summary}`, MAX_LINE));

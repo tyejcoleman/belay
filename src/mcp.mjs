@@ -134,11 +134,12 @@ export const TOOLS = [
   {
     name: 'belay_propose',
     description:
-      "Scan today's state files for loop-worthy signals (deferred work past its resume time, unfocused unconverged autonomous goals, stale-converged goals needing re-assess, budget freshly reset, keyoku's own ripe suggestions) and return proposal objects — each with evidence (exact figures + source file) and a ready-to-pass belay_loop_create argument object. Proposals are NEVER auto-armed: arming happens only via an explicit belay_loop_create call.",
+      "Scan today's state files for loop-worthy signals (deferred work past its resume time, unfocused unconverged autonomous goals, stale-converged goals needing re-assess, budget freshly reset, keyoku's own ripe suggestions) and return proposal objects — each with evidence (exact figures + source file) and a ready-to-pass belay_loop_create argument object. Proposals are NEVER auto-armed: arming happens only via an explicit belay_loop_create call. PROJECT-SCOPED (ADR-33): the unfocused-autonomous signal only surfaces goals armed under THIS project (same folder means same project) — a goal armed under an unrelated project's cwd is not shown here, even though it is still active+autonomous globally.",
     inputSchema: {
       type: 'object',
       properties: {
         dismiss: { type: 'string', description: "proposal id to dismiss (won't be re-surfaced until its underlying signal changes)" },
+        cwd: { type: 'string', description: 'working directory to scope project-based filtering against (default: the server process cwd)' },
       },
       additionalProperties: false,
     },
@@ -165,7 +166,10 @@ async function dispatch(name, args) {
     case 'belay_loop_disarm':
       return loopDisarm({ goal: args.goal });
     case 'belay_propose':
-      return typeof args.dismiss === 'string' && args.dismiss ? dismiss(args.dismiss) : scan();
+      // ADR-33: default cwd to the MCP server's own process cwd (which inherits the spawning
+      // session's cwd, same fallback belay_loop_create already uses) so project-scoped
+      // filtering is ACTIVE by default — the calling agent never has to know to pass it.
+      return typeof args.dismiss === 'string' && args.dismiss ? dismiss(args.dismiss) : scan({ cwd: typeof args.cwd === 'string' && args.cwd ? args.cwd : process.cwd() });
     /* c8 ignore next 2 — unreachable: mcpServe pre-checks the name against TOOLS */
     default:
       throw new Error(`unknown tool: ${name}`);

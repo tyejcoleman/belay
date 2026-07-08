@@ -1,6 +1,6 @@
-import { mkdirSync, chmodSync, writeFileSync, renameSync, readFileSync } from 'node:fs';
+import { mkdirSync, chmodSync, writeFileSync, renameSync, readFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
 // Belay is a READER of two other tools' state and a writer only of its own tiny
@@ -53,6 +53,74 @@ export function toEpochSec(v) {
     if (Number.isFinite(ms) && ms > 0) return Math.round(ms / 1000);
   }
   return null;
+}
+
+// ── Project-scoped session isolation (ADR-33) ────────────────────────────────
+// "Same folder means same project" (Tye, verbatim): belay's surfaces (proposal listing,
+// the portfolio steer, the statusline, `belay status`) must not leak one project's loop
+// state into an unrelated session just because keyoku's focus is a global singleton.
+// projectKeyForCwd derives a stable PROJECT KEY from a cwd; isSubtreeOf/projectMatches
+// answer "is this session's project the same as (or nested inside) that loop's project."
+// This is a VISIBILITY filter only — never consulted by decideStop/decideGate/decidePortfolio
+// for a block/allow verdict (mirrors the ADR-16/32 no-verdict-path rule).
+
+/**
+ * PROJECT KEY for a cwd — the git repo root, else the cwd itself. Walked via `.git` marker
+ * presence (a plain directory OR file — a worktree/submodule's `.git` is a FILE pointing
+ * elsewhere; `existsSync` doesn't care which) rather than spawning `git rev-parse
+ * --show-toplevel`: this runs on every Stop hook / statusline refresh (statusline.mjs's own
+ * contract is explicitly "no spawn"), so a subprocess per call is real, avoidable latency —
+ * a bounded filesystem walk is the same semantic result for a normal (non-bare) repo, with
+ * no dependency on `git` being on PATH and no cost in a sandboxed environment that blocks
+ * subprocess spawning. Never throws: a non-string/empty cwd → null; any FS error while
+ * walking → the raw cwd itself (never-crash, ADR-4 spirit) — "no git / not a repo → use the
+ * dir" holds either way.
+ * @param {string} cwd
+ * @returns {string|null}
+ */
+export function projectKeyForCwd(cwd) {
+  if (typeof cwd !== 'string' || !cwd) return null;
+  try {
+    const start = resolve(cwd);
+    let dir = start;
+    for (let i = 0; i < 64; i++) {
+      // bounded — never an infinite loop on a pathological FS (e.g. a dirname cycle)
+      if (existsSync(join(dir, '.git'))) return dir;
+      const parent = dirname(dir);
+      if (parent === dir) break; // reached the filesystem root
+      dir = parent;
+    }
+    return start; // no .git found anywhere up the tree — the (resolved) cwd itself is the project
+  } catch {
+    return cwd; // never throw — the raw cwd is still a usable (if unresolved) key
+  }
+}
+
+/**
+ * ADR-5-style ONE-WAY subtree containment: is `a` the same path as `b`, or nested inside it?
+ * Mirrors keyoku.mjs `scopeMatch`'s cwd check exactly (trailing slashes stripped so an empty
+ * string — from `'/'` — can never match everything); deliberately one-way — `b` being nested
+ * inside `a` is NOT a match. Duplicated here (not imported from keyoku.mjs) so this purely
+ * VISIBILITY-scoped helper never touches the verdict-critical module.
+ * @param {string} a @param {string} b @returns {boolean}
+ */
+export function isSubtreeOf(a, b) {
+  if (typeof a !== 'string' || !a || typeof b !== 'string' || !b) return false;
+  const x = a.replace(/\/+$/, '');
+  const y = b.replace(/\/+$/, '');
+  if (!x || !y) return false;
+  return x === y || x.startsWith(y + '/');
+}
+
+/** Does a SESSION whose project key is `sessionProject` count as "in scope" for a loop/goal
+ *  whose stored project key is `loopProject`? Same key, or the session's project is nested
+ *  inside the loop's (a session at a subtree of the project that armed the loop). Both
+ *  missing/non-string → false (never matches on absent data — a caller only reaches this
+ *  when it already knows BOTH keys are present; the "no project field → show it anyway"
+ *  fallback is the CALLER's job, exactly like ADR-25's loops.json no-eviction posture). */
+export function projectMatches(sessionProject, loopProject) {
+  if (typeof sessionProject !== 'string' || !sessionProject || typeof loopProject !== 'string' || !loopProject) return false;
+  return sessionProject === loopProject || isSubtreeOf(sessionProject, loopProject);
 }
 
 // ── Sanitizers for model-visible reasons (ADR-7) ─────────────────────────────

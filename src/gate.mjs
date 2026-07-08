@@ -131,23 +131,79 @@ const LOOP_CONTROL_ASK = /^mcp__(belay__belay_loop_disarm|keyoku__goal_(focus|un
 // any write-ish command targeting them routes to the human. Pure reads are left alone.
 const CONTROL_DIR = /\.(keyoku|belay)\b/;
 const WRITE_UTIL = /(?:^|[\s;|&`(\\])(?:[\w./-]*\/)?(?:touch|rm|mv|cp|sed|tee|dd|ln|truncate|chmod|chown|install|unlink|shred|mkdir|rmdir|python3?|node|perl)\b/i;
-/** Does the command reference belay's or keyoku's control dir — by the default `.keyoku`/`.belay`
+/** Does `text` reference belay's or keyoku's control dir — by the default `.keyoku`/`.belay`
  *  names OR by the ACTUALLY configured path (env overrides like BELAY_DIR don't use the dotted
- *  names, so the literal-name check alone was blind to them). */
-function referencesControlDir(command) {
-  if (CONTROL_DIR.test(command)) return true;
+ *  names, so the literal-name check alone was blind to them). Shared by the whole-command check
+ *  and the B9 redirect-target check below (a substring test, so it works on any slice of the
+ *  command, not just the full string). */
+function dirRefIn(text) {
+  if (typeof text !== 'string' || !text) return false;
+  if (CONTROL_DIR.test(text)) return true;
   try {
     const b = belayDir();
     const k = keyokuHome();
-    return (!!b && command.includes(b)) || (!!k && command.includes(k));
+    return (!!b && text.includes(b)) || (!!k && text.includes(k));
   } catch {
     return false; // env read failed → literal names only
   }
 }
+const referencesControlDir = dirRefIn;
+
+// B9 (read-only false positive): `cat ~/.belay/loops.json` and `grep .belay src/*.mjs` were
+// bogus 'control-file tampering' defers — the OLD check gated on "a redirect/mutating-verb
+// exists ANYWHERE on the line" + "the control dir is referenced ANYWHERE on the line",
+// independently, so a plain read that merely SEARCHES for '.belay' (a grep pattern, not even
+// a path) alongside an UNRELATED redirect elsewhere (`grep .belay src/ > /tmp/out.txt`) got
+// gated even though nothing ever writes into the control dir. Tighten: a command built
+// ENTIRELY from read-only inspection utilities (cat/grep/head/tail/less/wc/nm/file — every
+// top-level `;`/`|`/`&`-delimited segment led by one of these, and no `tee`/other WRITE_UTIL
+// verb anywhere) is read-only UNLESS one of its OWN redirect targets (`>`/`>>`, tail-scoped to
+// the next command boundary) resolves into the control dir — `cat x > ~/.belay/y.json` stays
+// gated (a genuine write hiding behind an otherwise-safe verb); `grep .belay src/*.mjs >
+// /tmp/out.txt` (redirect target is unrelated) does not. Any command NOT built entirely from
+// this allowlist (any wrapper, any other verb, any tee) falls straight through to the
+// pre-existing broad check below, UNCHANGED — this only ever REMOVES false positives on a
+// provably-read-only pipeline; it never widens what a write-capable command can get away with.
+const READ_ONLY_LEADING = new Set(['cat', 'grep', 'head', 'tail', 'less', 'wc', 'nm', 'file']);
+const LEADING_BIN = /^\s*(?:[\w./-]*\/)?([\w.-]+)/;
+const REDIRECT_SCAN = /[012]?>>?([^\n;|&`]*)/g;
+
+/** Is `command` built ENTIRELY from top-level segments (split on `;`/`|`/`&`/newline) each
+ *  led by a read-only inspection utility, with no `tee` and no other WRITE_UTIL verb anywhere
+ *  (checked broadly — not just as a segment leader — so it can't be smuggled in as a non-
+ *  leading token either)? A wrapper (`sh -c`, `env`, `sudo`, backticks, `$(...)`) is
+ *  deliberately NOT unwrapped here — its leading token won't be in the allowlist, so it just
+ *  falls through to the broad check, exactly like today. */
+function isReadOnlyPipeline(command) {
+  if (WRITE_UTIL.test(command)) return false; // any mutating verb (incl. tee) anywhere → not read-only
+  const segments = command
+    .split(/[\n;|&]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (!segments.length) return false;
+  for (const seg of segments) {
+    const m = LEADING_BIN.exec(seg);
+    const bin = m ? m[1].toLowerCase() : '';
+    if (!READ_ONLY_LEADING.has(bin)) return false;
+  }
+  return true;
+}
+
 export function controlFileTamper(command) {
   if (typeof command !== 'string' || !command) return false;
   if (!referencesControlDir(command)) return false;
-  return /[12]?>>?/.test(command) || WRITE_UTIL.test(command); // a redirect, or a mutating utility, alongside the control dir
+  if (isReadOnlyPipeline(command)) {
+    // Still gate a redirect whose OWN target lands in the control dir — a write disguised
+    // behind a read-only verb (`cat x > ~/.belay/y.json`). Tail-scoped to the next command
+    // boundary (mirrors RM_SCAN/VCS_SCAN's own tail-capture technique elsewhere in this file).
+    REDIRECT_SCAN.lastIndex = 0;
+    let m;
+    while ((m = REDIRECT_SCAN.exec(command))) {
+      if (dirRefIn(m[1])) return true;
+    }
+    return false;
+  }
+  return /[12]?>>?/.test(command) || WRITE_UTIL.test(command); // unchanged broad path: a redirect, or a mutating utility, alongside the control dir
 }
 
 // ── Config-driven danger table (ADR-18) ────────────────────────────────────────────────

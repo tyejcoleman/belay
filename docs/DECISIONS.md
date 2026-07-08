@@ -1212,6 +1212,158 @@ keyoku-absent/corrupted-loops/corrupted-snapshot never-crash, `renderMutations` 
 coverage, and two `belay status` integration cases — the one-liner appears with a real sessionId
 pin and is absent without one). 305 (post-ADR-31) + 16 = 321 total, `# fail 0`.
 
+## ADR-33 — project-scoped session isolation: "same folder means same project" *(2026-07-07)*
+
+**Decision:** keyoku's `goals.json` is a GLOBAL store and keyoku's `focus.json` a GLOBAL
+singleton — belay's own surfaces built on top of them (the proposal scan, the statusline, the
+portfolio steer, `belay status`) had NO concept of "project" at all, so a session in one
+project's directory saw every OTHER project's unfocused-autonomous goals too: a session in
+`/Development/openkakushin` surfaced `lar`/`nomos`/`forge`'s loop proposals — observed live as
+~60 cross-project proposals leaking into an unrelated session. This is a SECURITY/CORRECTNESS
+fix, not a feature: "same folder means same project" (Tye, verbatim) — a session must not see
+another project's loop state just because keyoku's own scoping is global.
+
+**PROJECT KEY (`projectKeyForCwd`, `src/util.mjs`):** the git repo root of a cwd, else the cwd
+itself. Deliberately implemented as a BOUNDED FILESYSTEM WALK (`existsSync(join(dir, '.git'))`,
+climbing `dirname` to the FS root, capped at 64 hops) rather than spawning `git -C <cwd>
+rev-parse --show-toplevel`: this key is derived on EVERY Stop hook / statusline refresh /
+SessionStart scan, and `belay statusline`'s own existing doc comment is explicit — "read-only,
+no network, no spawn, hook-latency-safe." A subprocess per call is real, avoidable latency on a
+surface that fires on every UI refresh; the fs-walk is the identical semantic result for a
+normal (non-bare) repo, with no dependency on `git` being on PATH and no cost in a sandboxed
+execution environment that blocks subprocess spawning. A `.git` FILE (a worktree/submodule
+pointer, not a directory) is treated identically — `existsSync` doesn't care which. Never
+throws: a non-string/empty cwd → `null`; any FS error mid-walk → the raw cwd itself (never-crash,
+ADR-4 spirit) — "no git / not a repo → use the dir" holds either way.
+
+**Subtree matching (`isSubtreeOf`/`projectMatches`, `src/util.mjs`):** a session matches a
+loop's stored project when the keys are identical, OR the session's OWN project is nested
+inside the loop's (`a === b || a.startsWith(b + '/')`, trailing slashes stripped so `'/'`
+strips to `''` and can never match everything) — the EXACT one-way algorithm `keyoku.mjs`'s
+`scopeMatch` already uses for the ADR-5 cwd-subtree block decision, duplicated (not imported)
+here on purpose: this pair is a pure VISIBILITY helper and must never become a dependency of
+the verdict-critical `keyoku.mjs` module, nor vice versa. One-way deliberately: an ANCESTOR
+session (an orchestrator at the repo root) does not inherit a DESCENDANT project's loop scope.
+
+**Tagging (`src/loops.mjs` `loopCreate`):** the loops.json entry gains an OPTIONAL `project`
+field, stamped from `projectKeyForCwd(cwd)` at arm time — additive, OMITTED when not derivable
+(in practice `loopCreate`'s `cwd` is always a non-empty string by the time this runs, so the
+field is written on effectively every new loop). Every project-scoped surface below applies the
+SAME fallback rule: **a loop with no `project` field (armed before this change, or never armed
+via belay at all) is NEVER hidden** — visibility only degrades toward "show it," never toward
+"hide it on unprovable evidence" (mirrors ADR-4's own posture). This is explicitly PROSPECTIVE:
+existing loops.json entries are not retroactively tagged, so the fix takes full effect as loops
+are re-armed going forward, not instantly for every already-armed loop machine-wide.
+
+**Four surfaces scoped, one session→project match rule (same key, or session nested inside the
+loop's project) throughout:**
+1. **`belay_propose`/`belay propose` (`src/propose.mjs` `scan`/`scanGoals`)** — the actual leak.
+   `scan({cwd})` gains an optional `cwd` param; the S2 unfocused-autonomous signal looks up each
+   candidate goal's OWN loops.json entry (`readLoops().loops[g.id]?.project`) and skips it when
+   present-but-mismatched. `cwd` defaults to `process.cwd()` at both call sites that reach a real
+   session (the MCP dispatch — the server inherits the spawning session's cwd, same fallback
+   `belay_loop_create` already uses — and the CLI), so filtering is ACTIVE by default; the
+   SessionStart hook passes `payload.cwd` (present on every real Stop/PreToolUse/SessionStart
+   payload). S1/S3/S4/S5/S6 are deliberately left UNSCOPED in this pass (S3/S5 are advisory
+   re-assess suggestions, not loops; S1/S4 are tokenroom-local; S6 is orphan-recovery — a
+   documented, narrower scope than the task's own "unfocused-autonomous goals" target).
+2. **`decidePortfolio`/`ownedActiveUnits` (`src/stop.mjs`)** — belt-and-suspenders ALONGSIDE
+   the pre-existing (already-exact) `session_id` match, never in place of it. Since the SAME
+   `session_id` means the SAME arming/steering process (hence the SAME cwd/project in virtually
+   every real case), this check is a no-op for legitimate use and only ever excludes a
+   genuinely anomalous session-id collision. **Explicit non-goal:** `keyoku.mjs`'s
+   `sessionOwnedGoalIds`/`readKeyoku` (the SINGLE-goal, non-portfolio path) is UNTOUCHED — it
+   remains the verdict-critical, locked-contract module; when the belt-and-suspenders filter
+   drops a session's portfolio below 2 owned units, control falls through to that pre-existing,
+   project-unaware single-goal path exactly as it always has (a documented limitation, not a
+   gap this ADR claims to close).
+3. **`belay statusline` (`src/statusline.mjs`)** — `ownedLoopsForStatusline` gains an optional
+   3rd `sessionProject` param; `statusline()` derives it from the stdin payload's `cwd` (falling
+   back to the statusline command's own process cwd). No subprocess is introduced (the fs-walk
+   design above), so the module's own "no spawn" contract holds byte-for-byte.
+4. **`belay status` (`src/status.mjs`)** — `openProposalCount(cwd)` filters the raw
+   `proposals.json` read (unchanged data source — this is NOT a live re-scan, which would have
+   pruned any externally-persisted proposal row not reproduced by a fresh S1-S6 signal) to
+   `kind !== 'unfocused-autonomous'` rows OR ones whose `evidence.goalId`'s loop project
+   matches; every other kind passes through untouched.
+
+**No-verdict-path guarantee (mirrors ADR-16/32):** every change in this ADR is a VISIBILITY
+filter. Nothing here is consulted by `decideStop`/`decideGate`/`decidePortfolio` for a
+block/allow/ask/deny verdict — `decidePortfolio` STILL runs the identical `decideStop` per unit
+and STILL steers/caps exactly as before; this ADR only changes which units make it into the
+`units` array in the first place, and only ever in the anomalous direction described above. The
+ADR-6 termination bound, the fall-arrest gate semantics, and every existing block/allow test are
+untouched — proven by the full 337 (pre-B9)/344 (post) suite staying green with zero prior-test
+edits beyond the two intentional call-site changes in `status.mjs`/`session-start.mjs`.
+
+**Backward-compat + never-crash throughout:** every new param (`scan`'s `cwd`,
+`ownedLoopsForStatusline`'s `sessionProject`) is additive and optional; every helper degrades to
+`null`/`false`/unscoped on absent or malformed input, never throws. A caller that never passes
+`cwd` (any test, or a hypothetical future caller) gets today's exact pre-ADR-33 behavior.
+
+**Files:** `src/util.mjs` (new — `projectKeyForCwd`, `isSubtreeOf`, `projectMatches`),
+`src/loops.mjs` (`loopCreate` stamps `project`), `src/propose.mjs` (`scan`/`scanGoals` gain
+`cwd`/`sessionProject`), `src/stop.mjs` (`ownedActiveUnits` belt-and-suspenders), `src/
+statusline.mjs` (`ownedLoopsForStatusline`/`statusline` gain `sessionProject`), `src/status.mjs`
+(`openProposalCount` gains `cwd`), `src/mcp.mjs` (`belay_propose` schema gains optional `cwd`),
+`bin/belay.mjs` (`propose --cwd`). Proof: `test/project-scope.test.mjs` (7 new — the core
+helpers: git-root walk at depth, worktree `.git` FILE, no-git fallback, missing-input
+never-crash, one-way subtree, `projectMatches` combinations), plus scoping tests folded into
+`test/loops.test.mjs` (+1: `project` stamped from a plain vs. a real nested git cwd),
+`test/propose.test.mjs` (+7: cross-project exclusion, same-project match, subtree match, the
+one-way non-match, legacy no-project-field fallback, no-loops-entry fallback, no-cwd-passed
+backward-compat, CLI `--cwd` parity), `test/portfolio.test.mjs` (+2: belt-and-suspenders excludes
+a mismatched-project unit from the owned portfolio while a matching/absent `project` changes
+nothing), `test/statusline.test.mjs` (+3: cross-project hidden, same-project/subtree shown,
+legacy fallback shown), `test/e2e-sota.test.mjs` (+1: `belay status`'s proposal count excludes a
+cross-project unfocused-autonomous row). 321 (pre-B9/ADR-33) + 2 (B9, ADR-34) + 21 = 344 total,
+`# fail 0`.
+
+## ADR-34 — B9 fix: a read-only command referencing `.belay`/`.keyoku` is not "control-file tampering" *(2026-07-07)*
+
+**Bug:** `src/gate.mjs`'s `controlFileTamper` (the HARD gate class protecting belay's/keyoku's
+own control files, ADR-19) gated on two conditions checked INDEPENDENTLY over the WHOLE command
+string: "does a redirect (`>`/`>>`) or a mutating verb (WRITE_UTIL) appear ANYWHERE" AND "does
+the control dir get referenced ANYWHERE" — with no requirement that the two relate to each
+other. A pure read that merely SEARCHES for `.belay`/`.keyoku` (a `grep` pattern, not even a
+path) alongside a redirect elsewhere on the same line to an UNRELATED file (`grep .belay
+src/*.mjs > /tmp/out.txt`) got a bogus `control-file tampering` defer/ask — a false positive on
+a command that never writes to the control dir at all.
+
+**Fix:** a command built ENTIRELY from read-only inspection utilities (`cat`/`grep`/`head`/
+`tail`/`less`/`wc`/`nm`/`file` — every top-level `;`/`|`/`&`-delimited segment led by one of
+these, verified via `isReadOnlyPipeline`) with no `tee` and no other WRITE_UTIL verb anywhere on
+the line is treated as read-only UNLESS one of its OWN redirect targets (tail-scoped to the next
+command boundary — the same tail-capture technique `RM_SCAN`/`VCS_SCAN` already use elsewhere in
+this file) resolves into the control dir. **Now allowed** (previously bogus-gated): `cat
+~/.belay/loops.json`, `grep .belay src/*.mjs`, `head -50 ~/.keyoku/goals.json`, `wc -l
+~/.belay/loops.json`, `nm -D bin | grep .belay`, `file ~/.belay/loops.json`, and any of these
+piped together or redirected to an UNRELATED path (`grep .belay src/gate.mjs >
+/tmp/results.txt`). **Still gated** (unchanged): every existing tamper case (`touch
+~/.keyoku/paused`, `> ~/.keyoku/focus.json`, `rm -f`/`mv`/`sed -i` on a control path, `echo …
+>> ~/.belay/loops.json`), PLUS the write disguised behind an otherwise-safe verb (`cat foo.json
+> ~/.belay/config.json` — the redirect's OWN target IS the control dir), a genuine mutating verb
+ANYWHERE on the line even alongside an unrelated read (`grep x notes.txt; rm
+~/.belay/loops.json`), and `tee` ANYWHERE — `tee` disqualifies read-only status unconditionally
+(it is itself a WRITE_UTIL verb; `isReadOnlyPipeline`'s first check is `WRITE_UTIL.test(command)
+→ false`), so `grep .belay src/gate.mjs | tee /tmp/out.txt` stays gated even though `tee`'s own
+target is unrelated — the conservative "over-ask is safe" posture, minus ONLY the provably
+read-only false positives.
+
+**Verified no hole opened:** any command NOT built ENTIRELY from the read-only allowlist (any
+wrapper — `sh -c`, `env`, backticks — any other verb, any `tee`) falls straight through to the
+PRE-EXISTING broad check, byte-for-byte unchanged; this fix only ever REMOVES a false positive
+on a provably-read-only pipeline, never widens what a write-capable command gets away with. The
+`WRITE_UTIL`/redirect broad check that gates every pre-existing tamper example is untouched.
+
+**Files:** `src/gate.mjs` (`controlFileTamper`, new `isReadOnlyPipeline` + shared `dirRefIn`
+helper — `referencesControlDir` is now an alias of it). Proof: `test/gate-fuzz.test.mjs` (+2: 13
+read-only false-positive cases now pass through cleanly; 5 still-gated regression cases —
+disguised write, unrelated real write on the same line, `tee` anywhere, and the two original
+direct-write forms — remain gated). Full `test/gate-fuzz.test.mjs`/`gate.test.mjs`/
+`gate-slm.test.mjs` (59 tests) stay green throughout — the HARD-class set, the wrapper-fuzz
+matrix, and the SLM refine/catch merge logic are all byte-identical.
+
 ## Non-ADR notes
 
 - **Compliance line (from the mission):** official surfaces only — Stop and PreToolUse

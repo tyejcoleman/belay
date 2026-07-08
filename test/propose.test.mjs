@@ -29,6 +29,7 @@ function withEnv(h, fn) {
 
 const propose = await import('../src/propose.mjs');
 const scanIn = (h, now) => withEnv(h, () => propose.scan({ nowSec: now }));
+const scanInCwd = (h, now, cwd) => withEnv(h, () => propose.scan({ nowSec: now, cwd }));
 const dismissIn = (h, id) => withEnv(h, () => propose.dismiss(id));
 const open = (r) => r.proposals.filter((p) => p.status === 'open');
 const proposalsFile = (h) => JSON.parse(readFileSync(join(h.belay, 'proposals.json'), 'utf8'));
@@ -101,6 +102,84 @@ test('S2: active+autonomous+unfocused goals propose; focused / non-autonomous / 
   assert.deepEqual(a.evidence.unmet, ['c1: tests green'], 'unmet tail joined + sanitized via unmetDetail');
   const b = got.find((p) => p.evidence.goalId === 'goal_b');
   assert.equal(b.evidence.unmet, undefined, 'no observations → no unmet evidence');
+});
+
+// ── ADR-33: project-scoped session isolation — S2 filtered by the session's cwd project ──
+// "Same folder means same project": keyoku's goals.json is a GLOBAL store, so an unfocused-
+// autonomous goal armed under one project's cwd previously surfaced to EVERY session on the
+// machine (the "~60 cross-project proposals" leak). A goal's project comes from its OWN
+// loops.json entry (stamped at belay_loop_create time, ADR-33) — a goal with no entry, or an
+// entry with no `project` field (a legacy loop, or one never armed via belay), always falls
+// back to today's unscoped behavior.
+
+test('ADR-33: a session in one project does NOT see an unfocused-autonomous goal armed under an UNRELATED project cwd', () => {
+  const h = homes();
+  const now = nowSec();
+  writeKeyoku(h, { goals: [goal({ id: 'goal_a', slug: 'goal-a' })] });
+  writeLoops(h, { goal_a: { session_id: 'someone-else', project: '/home/tye/Development/nomos' } });
+  const got = open(scanInCwd(h, now, '/home/tye/Development/openkakushin'));
+  assert.deepEqual(got, [], 'a nomos-armed goal must not leak into an openkakushin-cwd session');
+});
+
+test('ADR-33: a session in the SAME project as the arming loop still sees the unfocused-autonomous goal', () => {
+  const h = homes();
+  const now = nowSec();
+  writeKeyoku(h, { goals: [goal({ id: 'goal_a', slug: 'goal-a' })] });
+  writeLoops(h, { goal_a: { session_id: 'someone-else', project: '/home/tye/Development/openkakushin' } });
+  const got = open(scanInCwd(h, now, '/home/tye/Development/openkakushin'));
+  assert.equal(got.length, 1);
+  assert.equal(got[0].evidence.goalId, 'goal_a');
+});
+
+test('ADR-33: SUBTREE match — a session nested inside the armed project directory still sees it', () => {
+  const h = homes();
+  const now = nowSec();
+  writeKeyoku(h, { goals: [goal({ id: 'goal_a', slug: 'goal-a' })] });
+  writeLoops(h, { goal_a: { session_id: 'someone-else', project: '/home/tye/Development/openkakushin' } });
+  const got = open(scanInCwd(h, now, '/home/tye/Development/openkakushin/src'));
+  assert.equal(got.length, 1, 'a session cwd nested inside the loop\'s project subtree still matches');
+
+  // the reverse direction is NOT a match (one-way, mirrors keyoku.mjs scopeMatch/ADR-5)
+  const h2 = homes();
+  writeKeyoku(h2, { goals: [goal({ id: 'goal_a', slug: 'goal-a' })] });
+  writeLoops(h2, { goal_a: { session_id: 'someone-else', project: '/home/tye/Development/openkakushin/src' } });
+  const got2 = open(scanInCwd(h2, now, '/home/tye/Development/openkakushin'));
+  assert.deepEqual(got2, [], 'an ANCESTOR session cwd does not inherit a descendant project\'s loop (one-way)');
+});
+
+test('ADR-33: a legacy loop with NO project field is never hidden, regardless of the session cwd', () => {
+  const h = homes();
+  const now = nowSec();
+  writeKeyoku(h, { goals: [goal({ id: 'goal_a', slug: 'goal-a' })] });
+  writeLoops(h, { goal_a: { session_id: 'someone-else' } }); // no `project` — armed before ADR-33
+  const got = open(scanInCwd(h, now, '/home/tye/Development/openkakushin'));
+  assert.equal(got.length, 1, 'no project field on the loop → falls back to unscoped (today\'s) behavior');
+});
+
+test('ADR-33: a goal with NO loops.json entry at all is never hidden (never armed via belay)', () => {
+  const h = homes();
+  const now = nowSec();
+  writeKeyoku(h, { goals: [goal({ id: 'goal_a', slug: 'goal-a' })] });
+  const got = open(scanInCwd(h, now, '/home/tye/Development/openkakushin'));
+  assert.equal(got.length, 1);
+});
+
+test('ADR-33: no cwd passed to scan() → unscoped (today\'s, pre-ADR-33) behavior — a cross-project loop still shows', () => {
+  const h = homes();
+  const now = nowSec();
+  writeKeyoku(h, { goals: [goal({ id: 'goal_a', slug: 'goal-a' })] });
+  writeLoops(h, { goal_a: { session_id: 'someone-else', project: '/home/tye/Development/nomos' } });
+  const got = open(scanIn(h, now)); // scanIn never passes cwd — backward-compat callers
+  assert.equal(got.length, 1, 'omitting cwd never filters — additive/backward-compat');
+});
+
+test('ADR-33: bin `belay propose --cwd <dir>` scopes S2 the same way as the in-process scan()', () => {
+  const h = homes();
+  writeKeyoku(h, { goals: [goal({ id: 'goal_a', slug: 'goal-a' })] });
+  writeLoops(h, { goal_a: { session_id: 'someone-else', project: '/home/tye/Development/nomos' } });
+  const r = run(h, ['propose', '--cwd', '/home/tye/Development/openkakushin']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout).proposals, []);
 });
 
 // ── S3 stale-converged ─────────────────────────────────────────────────────────────────

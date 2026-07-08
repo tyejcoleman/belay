@@ -160,6 +160,44 @@ test('control-file tampering is gated: writes to ~/.keyoku and ~/.belay route to
   assert.equal(cls('grep foo ~/.belay/config.json'), null);
 });
 
+// ── B9: read-only false-positive fix (2026-07-07) ──────────────────────────────────────
+// The old check gated on "a redirect/mutating-verb exists ANYWHERE on the line" AND "the
+// control dir is referenced ANYWHERE on the line", independently — so a pure inspection
+// command that merely SEARCHES for '.belay' (a grep pattern, not even a path) alongside an
+// UNRELATED redirect elsewhere on the same line got a bogus 'control-file tampering' defer.
+
+test('B9: a read-only pipeline (cat/grep/head/tail/less/wc/nm/file) referencing .belay/.keyoku is NOT gated, even with an unrelated redirect elsewhere on the line', () => {
+  const safe = [
+    'cat ~/.belay/loops.json',
+    'grep .belay src/gate.mjs',
+    'grep -rn ".belay" src/',
+    'head -50 ~/.keyoku/goals.json',
+    'less ~/.keyoku/goals.json',
+    'tail -n 20 ~/.belay/decisions.jsonl',
+    'wc -l ~/.belay/loops.json',
+    'nm -D somebinary | grep .belay', // pipeline of two read-only verbs
+    'file ~/.belay/loops.json',
+    'grep .belay src/gate.mjs > /tmp/results.txt', // redirect exists, but its TARGET is unrelated
+    'grep -rn ".belay" src/ > /tmp/out.txt',
+    'cat notes.txt | grep .belay >> /tmp/log.txt',
+    'grep -c .belay src/*.mjs',
+  ];
+  const missed = safe.filter((c) => cls(c) !== null);
+  assert.deepEqual(missed, [], `B9 false positive — read-only command wrongly gated:\n${missed.join('\n')}`);
+});
+
+test('B9: a WRITE disguised behind an otherwise read-only verb, or a real write anywhere on the line, STILL gates', () => {
+  const stillTampers = [
+    'cat foo.json > ~/.belay/config.json', // the redirect's OWN target IS the control dir
+    'cat foo.json >> ~/.belay/loops.json',
+    'grep x notes.txt; rm ~/.belay/loops.json', // a genuine mutating verb elsewhere on the line
+    'grep .belay src/gate.mjs | tee /tmp/out.txt', // tee anywhere disqualifies read-only, even off-target
+    'tee ~/.belay/loops.json < /dev/null',
+  ];
+  const missed = stillTampers.filter((c) => cls(c) !== 'control-file tampering');
+  assert.deepEqual(missed, [], `B9 regression — a real write no longer gated:\n${missed.join('\n')}`);
+});
+
 test('control-file tampering catches the ACTUALLY configured dir, not just the .belay/.keyoku names', () => {
   const prev = process.env.BELAY_DIR;
   process.env.BELAY_DIR = '/tmp/custom-belay-home-xyz';

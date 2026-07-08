@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { belayDir, readJSON, ensureDir, atomicWriteJSON, sanitizeText, sanitizeSlug, toEpochSec } from './util.mjs';
+import { belayDir, readJSON, ensureDir, atomicWriteJSON, sanitizeText, sanitizeSlug, toEpochSec, projectKeyForCwd } from './util.mjs';
 import { keyokuHome, goalSlug } from './keyoku.mjs';
 import { mutateOwnState } from './state.mjs';
 import { keyokuSession } from './keyoku-client.mjs';
@@ -8,7 +8,14 @@ import { keyokuSession } from './keyoku-client.mjs';
 //   { "loops": { "<goalId>": { "armed": true, "paused": false, "armed_at": <epoch>,
 //       "armed_by": "model"|"user"|"proposal:<id>", "session_id": "...", "cwd": "...",
 //       "note": "...", "paused_at": <epoch|null>, "autonomy"?: "L0"|"L1"|"L2",
-//       "canonical"?: "<key>", "supersedes"?: "<goalIdOrSlug>" } } }
+//       "canonical"?: "<key>", "supersedes"?: "<goalIdOrSlug>", "project"?: "<key>" } } }
+// `project` (ADR-33, OPTIONAL, OMITTED when not derivable) is the PROJECT KEY derived from
+// the arming `cwd` (util.mjs `projectKeyForCwd` — the cwd's git repo root, else the cwd
+// itself) — "same folder means same project." VISIBILITY-scoping only (proposal listing /
+// the portfolio steer / the statusline / `belay status`, per ADR-33): a session whose OWN
+// derived project doesn't match (or subtree-contain) this loop's `project` doesn't see it on
+// those surfaces. Never consulted by decideStop/decideGate for a block/allow verdict — a
+// legacy entry with no `project` key falls back to today's (unscoped) behavior everywhere.
 // `canonical`/`supersedes` (both OPTIONAL, OMITTED unless explicitly passed) are DISPLAY-only
 // grouping hints — see `canonicalGroups` below — never consulted by any block/allow decision.
 // Single source of truth stays keyoku (goals.json + focus.json): belay stores ONLY what
@@ -398,6 +405,12 @@ export async function loopCreate(args = {}) {
   // "steps already completed are reported so the model can repair").
   const nowSec = now();
   const proposalId = typeof args.proposal_id === 'string' && args.proposal_id ? args.proposal_id : null;
+  // ADR-33: PROJECT KEY derived from the arming cwd — "same folder means same project."
+  // OMITTED entirely when not derivable (projectKeyForCwd degrades to null only on a bad
+  // `cwd`, which loopCreate never has by this point — cwd is always a non-empty string here),
+  // so a loop created before this change (or in the rare non-derivable case) carries no
+  // `project` key at all and every project-scoped surface falls back to today's behavior.
+  const project = projectKeyForCwd(cwd);
   try {
     const state = readLoops();
     state.loops = pruneLoops(state.loops, readGoalRows(), nowSec);
@@ -418,6 +431,8 @@ export async function loopCreate(args = {}) {
       // Canonical loop identity (display grouping only): OMITTED entirely when not passed.
       ...(canonicalKey !== undefined ? { canonical: canonicalKey } : {}),
       ...(supersedes !== undefined ? { supersedes } : {}),
+      // ADR-33: project-scoped session isolation — OMITTED when not derivable.
+      ...(typeof project === 'string' && project ? { project } : {}),
     };
     writeLoopsState(state.loops);
   } catch (e) {

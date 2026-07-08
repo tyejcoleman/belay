@@ -340,6 +340,26 @@ test('loop create: empty-string --canonical / --supersedes is refused pre-spawn 
   assert.equal(out2.step, 'supersedes');
 });
 
+// ── ADR-33: project-scoped session isolation — `project` stamped at arm time ────────────
+
+test('loop create: `project` is stamped on the loops.json entry from the arming cwd (git repo root, else the cwd itself)', () => {
+  const h = homes();
+  writeClaudeJson(h);
+  // a plain, non-git cwd → the project key is the cwd itself
+  const plain = JSON.parse(run(h, ['loop', 'create', '--objective', 'ship it', '--criteria', CRITERIA, '--session-id', 's1', '--cwd', '/tmp/proj']).stdout);
+  assert.equal(plain.ok, true, JSON.stringify(plain));
+  assert.equal(readLoopsFile(h).loops[plain.goal.id].project, '/tmp/proj');
+
+  // a real git repo, armed from a NESTED subdirectory → the project key is the repo ROOT
+  const h2 = homes();
+  writeClaudeJson(h2);
+  mkdirSync(join(h2.base, 'repo', '.git'), { recursive: true });
+  mkdirSync(join(h2.base, 'repo', 'sub', 'deep'), { recursive: true });
+  const nested = JSON.parse(run(h2, ['loop', 'create', '--objective', 'ship it', '--criteria', CRITERIA, '--session-id', 's1', '--cwd', join(h2.base, 'repo', 'sub', 'deep')]).stdout);
+  assert.equal(nested.ok, true, JSON.stringify(nested));
+  assert.equal(readLoopsFile(h2).loops[nested.goal.id].project, join(h2.base, 'repo'));
+});
+
 // ── canonicalGroups: the pure grouping helper backing statusline collapsing (ADR-31) ────
 
 test('canonicalGroups: explicit `canonical` key groups two otherwise-unrelated slugs', async () => {

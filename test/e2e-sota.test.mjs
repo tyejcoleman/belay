@@ -326,6 +326,23 @@ test('status CLI: focused goal without a loop entry states the hold applies rega
   assert.ok(noteLine.length < 200, 'note is capped, flood cannot land');
 });
 
+test('status CLI: ADR-33 project-scoping — an unfocused-autonomous proposal for a goal armed under an UNRELATED project is excluded from the open count', () => {
+  const h = homes();
+  seedFocusedWorld(h); // focus.cwd = '/tmp/proj' — status() derives payload.cwd from it
+  writeProposals(h, [
+    { kind: 'unfocused-autonomous', status: 'open', evidence: { goalId: 'goal_other' } }, // different project → excluded
+    { kind: 'unfocused-autonomous', status: 'open', evidence: { goalId: 'goal_same' } }, // same project → counted
+    { status: 'open' }, // not kind 'unfocused-autonomous' — never filtered (out of scope for this pass)
+  ]);
+  writeLoops(h, {
+    goal_other: { session_id: 'x', project: '/tmp/some-other-project' },
+    goal_same: { session_id: 'y', project: '/tmp/proj' },
+  });
+  const r = run(h, ['status']);
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /proposals: 2 open/, 'goal_other excluded — 2 of the 3 seeded open rows remain');
+});
+
 test('status CLI: no focus → still reports open proposals (advises across sessions)', () => {
   const h = homes();
   writeKeyoku(h, {}); // keyoku home present, nothing focused

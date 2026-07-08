@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { readStdin, readConfig, fmtClock, fmtDuration, toEpochSec, sanitizeSlug, capReason, belayDir, ensureDir, readJSON } from './util.mjs';
+import { readStdin, readConfig, fmtClock, fmtDuration, toEpochSec, sanitizeSlug, capReason, belayDir, ensureDir, readJSON, projectKeyForCwd, projectMatches } from './util.mjs';
 import { readKeyoku, keyokuHome, tailObservation, goalSlug, unmetDetail } from './keyoku.mjs';
 import { readBudget } from './budget.mjs';
 import { readOwnState, sessionEntry, saveSessionEntry, portfolioEntry, portfolioSteeredAt, savePortfolioEntry } from './state.mjs';
@@ -313,6 +313,16 @@ export function decideStop(_p, k, budget, cfg, entry, nowSec = Date.now() / 1000
  * qualify (identical predicate to keyoku.sessionOwnedGoalIds). [] when keyoku is absent or
  * globally paused, goals are unreadable, session_id is missing, or the session owns none —
  * in every one of those cases the caller falls back to the single-goal path. Never throws.
+ *
+ * ADR-33 belt-and-suspenders: alongside the exact `session_id` match above, a unit whose loop
+ * entry carries a `project` (stamped at arm time) that does NOT match this session's OWN
+ * derived project (from `p.cwd`, ADR-5-style subtree) is ALSO excluded. In normal operation
+ * this can never remove anything `session_id` wouldn't already have excluded — the SAME
+ * session_id means the SAME arming/steering process, hence the SAME cwd/project in virtually
+ * every real case — this is a second, independent guard against a session-id reuse/spoof
+ * anomaly, never the primary scoping mechanism, and it NEVER changes a block/allow verdict for
+ * legitimate use (a loop with no `project` field — a legacy loop, or a `p.cwd`-less caller —
+ * is never excluded by this check; VISIBILITY-only, mirrors the ADR-16/32 no-verdict-path rule).
  * @returns {Array<{ goalId: string, k: object, loopEntry: object }>}
  */
 export function ownedActiveUnits(p, loops) {
@@ -323,9 +333,11 @@ export function ownedActiveUnits(p, loops) {
     if (!existsSync(home) || existsSync(join(home, 'paused'))) return []; // keyoku absent / globally paused → single path allows
     const goals = readJSON(join(home, 'goals.json'));
     if (!Array.isArray(goals)) return [];
+    const sessionProject = typeof p?.cwd === 'string' && p.cwd ? projectKeyForCwd(p.cwd) : null;
     const units = [];
     for (const [goalId, e] of Object.entries(loops)) {
       if (!e || typeof e !== 'object' || e.session_id !== sessionId || e.armed !== true || e.paused === true) continue;
+      if (sessionProject && typeof e.project === 'string' && e.project && !projectMatches(sessionProject, e.project)) continue; // ADR-33 belt-and-suspenders
       const goal = goals.find((g) => g && typeof g === 'object' && g.id === goalId && typeof g.status === 'string');
       if (!goal || goal.status !== 'active') continue;
       const obs = tailObservation(join(home, 'observations', `${goalId}.jsonl`));

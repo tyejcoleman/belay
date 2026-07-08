@@ -149,6 +149,35 @@ test('a non-active (e.g. converged) goal row is not shown even if armed', () => 
   assert.equal(r.stdout, '');
 });
 
+// ── ADR-33: project-scoped session isolation ────────────────────────────────────────────
+
+test('ADR-33: a loop armed under an UNRELATED project cwd does not appear on the statusline', () => {
+  const h = homes();
+  writeKeyoku(h, { goals: [goal()] });
+  writeLoops(h, { goal_test1: { session_id: 's1', project: '/home/tye/Development/nomos' } });
+  const r = statusline(h, { session_id: 's1', cwd: '/home/tye/Development/openkakushin' });
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout, '');
+});
+
+test('ADR-33: a loop armed under the SAME project cwd still shows; a SUBTREE cwd still matches', () => {
+  const h = homes();
+  writeKeyoku(h, { goals: [goal()] });
+  writeLoops(h, { goal_test1: { session_id: 's1', project: '/home/tye/Development/openkakushin' } });
+  const same = statusline(h, { session_id: 's1', cwd: '/home/tye/Development/openkakushin' });
+  assert.equal(same.stdout, '⟳ loop ship-widget');
+  const sub = statusline(h, { session_id: 's1', cwd: '/home/tye/Development/openkakushin/src' });
+  assert.equal(sub.stdout, '⟳ loop ship-widget', 'a session nested inside the armed project subtree still matches');
+});
+
+test('ADR-33: a legacy loop with NO project field always shows, regardless of the statusline\'s cwd', () => {
+  const h = homes();
+  writeKeyoku(h, { goals: [goal()] });
+  writeLoops(h, { goal_test1: { session_id: 's1' } }); // no `project` — armed before ADR-33
+  const r = statusline(h, { session_id: 's1', cwd: '/home/tye/Development/some-unrelated-dir' });
+  assert.equal(r.stdout, '⟳ loop ship-widget');
+});
+
 test('missing session id (no stdin session_id, no $CLAUDE_CODE_SESSION_ID) → empty, no crash', () => {
   const h = homes();
   writeKeyoku(h, { goals: [goal()] });

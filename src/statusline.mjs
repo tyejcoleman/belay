@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { readJSON, sanitizeSlug } from './util.mjs';
+import { readJSON, sanitizeSlug, projectKeyForCwd, projectMatches } from './util.mjs';
 import { readLoops, canonicalGroups } from './loops.mjs';
 import { keyokuHome, goalSlug, tailObservation } from './keyoku.mjs';
 
@@ -51,9 +51,17 @@ export function resolveSessionId(payload) {
  * renders a paused loop distinctly rather than treating it as unowned). Read-only
  * (loops.json is passed in; one goals.json read; one observation-tail read per non-paused
  * unit, mirroring `ownedActiveUnits`'s per-unit obs read). Never throws — any failure yields
- * []. @returns {Array<{goalId, slug, paused, armedAt, criteriaTotal, unmetCount}>}
+ * [].
+ *
+ * ADR-33 project-scoping: `sessionProject` (optional — the project key derived from THIS
+ * statusline invocation's cwd; omitted/null → today's unscoped behavior) excludes a unit
+ * whose loop entry carries a `project` that does NOT match (same key, or this session's
+ * project nested inside it). A loop with no `project` field (a legacy loop, or one never
+ * armed via belay) is never excluded — "only THIS project's loops" without ever hiding a
+ * legacy entry on unprovable evidence.
+ * @returns {Array<{goalId, slug, paused, armedAt, criteriaTotal, unmetCount}>}
  */
-export function ownedLoopsForStatusline(sessionId, loopsMap) {
+export function ownedLoopsForStatusline(sessionId, loopsMap, sessionProject = null) {
   if (typeof sessionId !== 'string' || !sessionId || !loopsMap || typeof loopsMap !== 'object') return [];
   try {
     const goals = readJSON(join(keyokuHome(), 'goals.json'));
@@ -61,6 +69,7 @@ export function ownedLoopsForStatusline(sessionId, loopsMap) {
     const out = [];
     for (const [goalId, e] of Object.entries(loopsMap)) {
       if (!e || typeof e !== 'object' || e.session_id !== sessionId || e.armed !== true) continue;
+      if (sessionProject && typeof e.project === 'string' && e.project && !projectMatches(sessionProject, e.project)) continue; // ADR-33
       const g = goals.find((x) => x && typeof x === 'object' && x.id === goalId && typeof x.status === 'string');
       if (!g || g.status !== 'active') continue;
       const paused = e.paused === true;
@@ -160,8 +169,15 @@ export async function statusline() {
     const payload = await readStdinJSON();
     const sessionId = resolveSessionId(payload);
     if (!sessionId) return '';
+    // ADR-33: this project's loops only. `payload.cwd` (the same JSON blob carries it
+    // alongside session_id) wins; falling back to the statusline command's OWN process cwd
+    // (which Claude Code spawns from the session's project directory) rather than skipping
+    // scoping entirely — no subprocess spawn either way (projectKeyForCwd is a pure fs walk),
+    // so this stays inside statusline.mjs's own "no spawn, hook-latency-safe" contract.
+    const cwd = typeof payload?.cwd === 'string' && payload.cwd ? payload.cwd : process.cwd();
+    const sessionProject = projectKeyForCwd(cwd);
     const loopsMap = readLoops().loops;
-    const units = ownedLoopsForStatusline(sessionId, loopsMap);
+    const units = ownedLoopsForStatusline(sessionId, loopsMap, sessionProject);
     return renderStatusline(units);
   } catch {
     return '';

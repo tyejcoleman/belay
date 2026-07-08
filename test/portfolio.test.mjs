@@ -171,6 +171,43 @@ test('backward-compat: one owned goal → single (flat) path, no portfolio wordi
   assert.equal(st.portfolios, undefined); // the portfolios map is never created for a single-goal session
 });
 
+// ── ADR-33: project-scoping belt-and-suspenders on ownedActiveUnits ──────────────────────
+// Alongside the existing (already-exact) session_id match, a unit whose loop entry carries a
+// `project` that does NOT match this session's OWN derived project (from the Stop payload's
+// cwd) is ALSO excluded from the owned set — a second, independent guard. A loop with no
+// `project` field is never affected (legacy fallback).
+
+test('ADR-33: a loop entry whose stored project does NOT match this session\'s cwd project is excluded from the owned portfolio', () => {
+  const h = homes();
+  // THREE goals owned by session A: goal_x/goal_y carry the SAME project as the stop
+  // payload's cwd ('/tmp/proj'); goal_z carries an UNRELATED project. Belt-and-suspenders
+  // excludes goal_z from the owned SET (still 2 remain → the portfolio path still engages
+  // normally), and goal_z must never appear anywhere in the steered reason.
+  writeKeyoku(h, { goals: [gX(), gY(), gZ()], focus: focusFor({ goalId: 'goal_x', goalSlug: 'goal-x' }), obsLines: [unmetObs('goal_x')] });
+  writeKeyoku(h, { obsLines: [unmetObs('goal_y')] });
+  writeKeyoku(h, { obsLines: [unmetObs('goal_z')] });
+  writeLoops(h, {
+    goal_x: { session_id: 'A', project: '/tmp/proj' },
+    goal_y: { session_id: 'A', project: '/tmp/proj' },
+    goal_z: { session_id: 'A', project: '/tmp/some-other-project' },
+  });
+  writeTokenroom(h, { leftPct: 72 });
+  const r = JSON.parse(stop(h, stopPayload({ session_id: 'A', cwd: '/tmp/proj' })).stdout);
+  assert.equal(r.decision, 'block');
+  assert.match(r.reason, /\[belay portfolio\] this session owns 2 active goal\(s\)/, 'goal_z excluded — only 2 owned, portfolio path still engages');
+  assert.doesNotMatch(r.reason, /goal-z/, 'the project-mismatched goal never appears in the steered reason');
+});
+
+test('ADR-33: matching (or absent) project fields never change portfolio behavior — belt-and-suspenders is a no-op in the normal case', () => {
+  const h = homes();
+  twoGoalPortfolio(h);
+  // both loops carry the SAME project as the session's cwd — the normal, expected case.
+  writeLoops(h, { goal_x: { session_id: 'A', project: '/tmp/proj' }, goal_y: { session_id: 'A', project: '/tmp/proj' } });
+  const r = JSON.parse(stop(h, stopPayload({ session_id: 'A', cwd: '/tmp/proj' })).stdout);
+  assert.equal(r.decision, 'block');
+  assert.match(r.reason, /\[belay portfolio\] this session owns 2 active goal\(s\)/, 'both goals still owned — matching projects change nothing');
+});
+
 // ── never-crash: a corrupt loops.json degrades to the single path, never throws ──────────
 test('never-crash: garbage loops.json falls back to the single focus path (still blocks, exit 0)', () => {
   const h = homes();
