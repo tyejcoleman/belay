@@ -1065,6 +1065,153 @@ armed, missing session_id from both stdin and env, garbage non-JSON stdin, corru
 keyoku home entirely absent — every case asserts both the stdout content AND exit code 0/empty
 stderr). 280 prior + 12 = 292 total, `# fail 0`.
 
+## ADR-31 — canonical loops: a superseded goal-chain renders as ONE entry, a sliding window keeps every instance *(2026-07-07)*
+
+**Decision:** A belay loop's `loops.json` entry may now carry two OPTIONAL, OMITTED-unless-
+passed display-grouping fields — `canonical?: string` (`--canonical <key>` /
+`belay_loop_create`'s `canonical` arg — a direct, human-chosen group id) and
+`supersedes?: string` (`--supersedes <goalIdOrSlug>` — "this loop replaces that one"), both
+validated pre-spawn exactly like `scope`/`autonomy` (a non-empty string or refused, never
+silently coerced). A new pure, exported helper `canonicalGroups(units)` (`src/loops.mjs`)
+groups a flat list of loop-unit descriptors into CANONICAL groups by resolving each unit's key
+in priority order: (1) its own explicit `canonical` key wins outright; (2) an explicit
+`supersedes` reference that resolves to ANOTHER unit in the same candidate set inherits THAT
+unit's own resolved key (chain-safe — any chain length collapses to one group; a cycle or
+self-reference is broken by a per-resolution visited-set and falls through to rule 3, never
+hangs); (3) the automatic **`-vN` / `-vN.M` slug-STEM fallback** (`stemSlug`, also exported) —
+`'foo-recomp-v2'` → `'foo-recomp'` — so an ordinary version-bumped slug groups with **no
+explicit wiring at all**. A loop with neither an explicit key/reference nor a version-suffixed
+slug is its own singleton group.
+
+`src/statusline.mjs`'s `renderStatusline` now calls `canonicalGroups` FIRST (`collapseCanonical`,
+loops.mjs-adjacent, statusline-local) and collapses each group to ONE representative before the
+existing active/paused counting logic runs: a group with ≥1 active (non-paused) member is
+represented by its NEWEST active member (max `armed_at`, ties by goalId); an all-paused group by
+its newest paused member. So N instances of the SAME canonical loop (e.g.
+`openkakushin-recomp` superseded by `openkakushin-recomp-v2`) render as ONE `⟳ loop
+openkakushin-recomp-v2`, not `⟳ loop ×2` — while genuinely DISTINCT loops (no shared key, no
+shared stem) still count separately toward `×N`. **The sliding window: nothing is deleted.**
+Every armed instance stays in `loops.json` untouched by this feature (`prune-on-write`'s
+existing 7-day-post-convergence rule is the only thing that ever drops an entry, unchanged) —
+canonical grouping only ever picks WHICH member represents a group on a DISPLAY surface.
+
+**Why:** the user's own multi-session recomp loop (`openkakushin-recomp` → superseded by
+`openkakushin-recomp-v2`) is logically ONE ongoing effort, but each carries its own
+`loops.json`/`goals.json` row, so the statusline showed `⟳ loop ×2` for what is, to a human
+glancing at the indicator, one thing — noise that obscures rather than informs. Requiring an
+explicit flag for EVERY version bump would be friction for the common case (a slug that already
+encodes its version), so the `-vN` stem is the zero-config default and the explicit
+`canonical`/`supersedes` fields exist for chains that don't follow that naming convention (or
+that want a deliberately-shared human-chosen key across otherwise-unrelated slugs).
+
+**Never a decision input:** `canonical`/`supersedes` are read ONLY by `canonicalGroups` (a pure
+display-grouping helper) and `collapseCanonical` (statusline rendering). Neither `decideStop`
+nor `decideGate` nor `decidePortfolio` (ADR-25) ever reads either field — the Stop-hook
+hold and PreToolUse arrest are computed exactly as before, per-goal, regardless of any
+canonical grouping. Grouping can therefore never change WHICH goal is steered/held, only how
+many glyphs the statusline renders for a session's owned set.
+
+**Backward-compat (constraint 1):** a loop created without `canonical`/`supersedes` — every loop
+that existed before this change, and every new loop created without the arguments — carries
+NEITHER key at all, byte-identical to a pre-ADR-31 entry. Two loops with genuinely unrelated
+slugs and no explicit field (e.g. the existing `goal-x`/`goal-y` statusline fixtures) still group
+into separate singleton groups (their own slug is their own stem), so `renderStatusline`'s
+pre-existing `×N`/`(+K⏸)` output is UNCHANGED for every case that doesn't opt into (or
+accidentally match) a shared `-vN` stem.
+
+**Never-crash (ADR-4):** `canonicalGroups` degrades a non-array `units` to `[]` and filters out
+any member missing a valid string `goalId`; `resolveCanonicalKey`'s cycle guard (mark-before-
+recurse on a `Set` keyed by `goalId`) provably terminates for any `supersedes` graph, including
+a direct cycle (proven in `test/loops.test.mjs`). `stemSlug` degrades a non-string input to `''`.
+Both are pure string/array ops — no I/O, cannot throw.
+
+**Files:** `src/loops.mjs` (`stemSlug`, `resolveCanonicalKey`, `canonicalGroups`, `canonical`/
+`supersedes` validation + entry storage in `loopCreate`), `src/statusline.mjs`
+(`collapseCanonical`, wired into `renderStatusline`; `ownedLoopsForStatusline` now carries
+`canonical`/`supersedes` through to the unit shape), `bin/belay.mjs` (`--canonical`/
+`--supersedes` flags + help text), `src/mcp.mjs` (`belay_loop_create` schema gains the two
+optional string properties — additive, mirrors how `autonomy` was added in ADR-28 despite
+ADR-9's "frozen" 7-tool surface referring to the tool COUNT, not that no field may ever be
+added). Proof: `test/loops.test.mjs` (8 new: `--canonical`/`--supersedes` stored vs omitted,
+empty-string refused pre-spawn, explicit-key grouping, `-vN`/`-vN.M` stem fallback, a
+mixed-slug/goalId `supersedes` chain + a self-cycle that must not hang, distinct loops stay
+separate, malformed-input never-crash, `stemSlug` unit table) and `test/statusline.test.mjs` (5
+new: the `openkakushin-recomp`/`-v2` collapse, an explicit-key collapse of unrelated slugs,
+distinct loops still `×2`, an all-paused canonical group collapses to one `⏸`, a mixed active+
+paused SAME-group collapse with no spurious paused suffix). 292 prior + 13 = 305 green (ADR-32
+below adds the remaining 16 for this build's total).
+
+## ADR-32 — goal-mutation tracking: `belay mutations` always checks what changed *(2026-07-07)*
+
+**Decision:** A new read-mostly module `src/mutations.mjs` gives belay a way to always see what
+CHANGED about a session's owned keyoku goals. It persists a small snapshot —
+`~/.belay/goal-snap-<session>.json`, `{session_id, at, goals: {<goalId>: {slug, status,
+convergedAt, criteria:{count,hash}}}}` — of every goal THIS session OWNS (any `loops.json` entry
+with a matching `session_id`, deliberately **not** filtered to armed/active/non-paused like B3's
+`sessionOwnedGoalIds`, since mutation tracking exists specifically to observe a status
+transition OUT of that set, e.g. active → converged/abandoned). `criteriaFingerprint` is a
+cheap, order-independent `{count, hash}` over `id:description` pairs — enough to detect an
+add/remove/edit without carrying the full criteria payload into the snapshot file.
+
+`belay mutations [--session-id <id>] [--json]` (session id else auto-detected from
+`$CLAUDE_CODE_SESSION_ID`, mirroring B4/ADR-26) is the primary surface: `computeMutations`
+reads the LIVE owned-goal state, diffs it (`diffGoalSnapshots`, pure) against the last-persisted
+snapshot, reports **newly-converged, newly-abandoned, status flips, criteria added/removed, and
+new/removed owned goals**, then persists a FRESH snapshot so the NEXT check diffs from now —
+"updated on read," a sliding baseline rather than a fixed epoch. **The very first-ever check for
+a session establishes the baseline and reports an EMPTY diff** (not "every currently-owned goal
+is new") — there is nothing to have mutated FROM yet; only the SECOND and later checks compute a
+real diff. `belay status` additionally folds a one-line `mutations: N changed since last
+check` summary into its existing proposals/pending block, gated on having a REAL session id (the
+focus's own `sessionId` pin, else `$CLAUDE_CODE_SESSION_ID`) — never the synthetic
+`'status-probe'` placeholder status.mjs otherwise uses, so a mutations snapshot is never written
+under a fabricated key (no-fabrication, mirrors the existing counters/verdict `attribution`
+posture in the same file).
+
+**The gate boundary (explicit, load-bearing):** this feature is **detection/reporting only**.
+Nothing in `src/mutations.mjs` is consulted by `decideStop`, `decideGate`, or `decidePortfolio`
+— there is no code path from a goal-mutation snapshot/diff to a block/allow/ask/deny verdict
+(the same "no-path rule" ADR-16 established for the `pending.json` queue, mirrored here for a
+second belay-owned file). In particular, **this does NOT loosen belay's PreToolUse gate on
+goal-abandon/pause**: ADR-19's `loop control` HARD class still routes `goal_update`/
+`goal_converge`/`goal_focus`/`goal_unfocus`/`belay_loop_disarm` to the human exactly as before —
+`src/gate.mjs` is untouched by this ADR, byte-for-byte. "Respect active goals" (never disarm/
+abandon a goal on the agent's own judgment) remains true: retiring a loop stays the
+human-directed `belay loop disarm` path; `belay mutations` can tell you a goal converged or was
+abandoned, but it cannot cause either, and observing the fact changes no permission.
+
+**Why:** the user's standing directive is "management there needs to be good" for goals under
+active autonomous loops — an agent (or human) steering a session's goal portfolio (B3/ADR-25)
+currently has no way to notice, without manually re-reading every goal row, that a sibling goal
+quietly converged, got abandoned, had its criteria edited out from under it, or that the loop's
+owned set itself changed shape (a goal armed or disarmed elsewhere in the session). `belay
+status` is a snapshot of NOW; `belay mutations` is the snapshot of **what changed since last
+time you checked** — the piece "always check for mutations" asks for.
+
+**Never-crash (ADR-4), read-only on keyoku:** `computeMutations` never writes `~/.keyoku` (only
+reads `goals.json` + belay's own `loops.json`); the ONLY write is the session's own snapshot
+file, and that write is itself best-effort (a failure there never blocks the read/report). No
+session id, no keyoku home, a corrupted `loops.json`, or a corrupted PRIOR snapshot file all
+degrade to an EMPTY diff (`hasPrior:false` for the corrupted-snapshot case — treated as "no
+prior," self-repairing on the next successful write) — never a throw, always exit 0 for the CLI.
+`diffGoalSnapshots`/`mutationCount`/`renderMutations` are pure and defensively typed throughout
+(malformed shapes degrade to empty/zero rather than throwing).
+
+**Backward-compat:** additive-only — a new file (`src/mutations.mjs`), a new CLI verb
+(`mutations`), and one new best-effort block inside `status.mjs`'s existing `proposalsLine`
+closure; no existing export, schema, or decision function is touched. No new MCP tool (the
+7-tool surface stays frozen, ADR-9) — `belay mutations` is CLI-only in this build.
+
+**Files:** `src/mutations.mjs` (new — `criteriaFingerprint`, `currentOwnedGoals`,
+`diffGoalSnapshots`, `mutationCount`, `computeMutations`, `renderMutations`,
+`mutationsCommand`), `bin/belay.mjs` (`case 'mutations'` dispatch + help text), `src/status.mjs`
+(the one-line summary, session-id-gated). Proof: `test/mutations.test.mjs` (16 new: every pure
+helper incl. never-crash on malformed input, the first-check-establishes-baseline property, CLI
+end-to-end for converged/abandoned/criteria-added/new-and-removed-owned-goal, no-session-id/
+keyoku-absent/corrupted-loops/corrupted-snapshot never-crash, `renderMutations` section
+coverage, and two `belay status` integration cases — the one-liner appears with a real sessionId
+pin and is absent without one). 305 (post-ADR-31) + 16 = 321 total, `# fail 0`.
+
 ## Non-ADR notes
 
 - **Compliance line (from the mission):** official surfaces only — Stop and PreToolUse

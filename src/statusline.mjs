@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { readJSON, sanitizeSlug } from './util.mjs';
-import { readLoops } from './loops.mjs';
+import { readLoops, canonicalGroups } from './loops.mjs';
 import { keyokuHome, goalSlug, tailObservation } from './keyoku.mjs';
 
 // `belay statusline` (docs/DECISIONS.md ADR-30): a PERSISTENT, compact indicator that THIS
@@ -73,6 +73,11 @@ export function ownedLoopsForStatusline(sessionId, loopsMap) {
         armedAt: typeof e.armed_at === 'number' && Number.isFinite(e.armed_at) ? e.armed_at : 0,
         criteriaTotal: Array.isArray(g.criteria) ? g.criteria.length : null,
         unmetCount: obsRec && Array.isArray(obsRec.unmet) ? obsRec.unmet.length : null,
+        // Canonical-loop grouping hints (display only — see `loops.mjs canonicalGroups`):
+        // undefined when the loop entry carries neither, so an old/unset entry behaves
+        // exactly as before (falls through to the automatic -vN stem heuristic).
+        canonical: typeof e.canonical === 'string' && e.canonical ? e.canonical : undefined,
+        supersedes: typeof e.supersedes === 'string' && e.supersedes ? e.supersedes : undefined,
       });
     }
     out.sort((a, b) => a.armedAt - b.armedAt || (a.goalId < b.goalId ? -1 : a.goalId > b.goalId ? 1 : 0));
@@ -91,6 +96,32 @@ function metSuffix(u) {
 }
 
 /**
+ * Collapse a session's owned units to ONE representative per CANONICAL group (a superseded
+ * goal-chain — e.g. `openkakushin-recomp` superseded by `openkakushin-recomp-v2` — renders
+ * as a single entry, not `×2`; see `loops.mjs canonicalGroups`). The sliding window: every
+ * instance stays in loops.json/goals.json (nothing is deleted here — this only picks which
+ * ONE member of a group represents it on the statusline). Per group: if it has at least one
+ * ACTIVE (non-paused) member, the representative is the NEWEST active one (max `armedAt`,
+ * ties broken by goalId for determinism); an all-paused group is represented by its newest
+ * paused member. Pure, no I/O — never throws on a malformed `units` array (delegates to
+ * `canonicalGroups`, which already degrades to `[]`).
+ */
+function collapseCanonical(units) {
+  const groups = canonicalGroups(Array.isArray(units) ? units : []);
+  const out = [];
+  for (const g of groups) {
+    const active = g.members.filter((u) => !u.paused);
+    const pool = active.length ? active : g.members;
+    let rep = pool[0];
+    for (const u of pool) {
+      if (u.armedAt > rep.armedAt || (u.armedAt === rep.armedAt && u.goalId > rep.goalId)) rep = u;
+    }
+    out.push(rep);
+  }
+  return out;
+}
+
+/**
  * Pure render: the already-resolved unit list → the one-line indicator (independently
  * testable, no I/O). '' when the session owns no armed active loop (paused or not) — the
  * statusline then shows nothing extra. A distinctive glyph makes loop-mode unmistakable:
@@ -98,11 +129,14 @@ function metSuffix(u) {
  * Single loop names its slug (+ `<met>/<total>` when cheaply known); N>1 collapses to a
  * compact `×N` count — statuslines are cramped, and this stays O(1) width regardless of
  * portfolio size. A mix of active + paused loops leads with the ⟳ active summary and
- * appends a short paused count so neither is silently hidden.
+ * appends a short paused count so neither is silently hidden. Units are grouped into
+ * CANONICAL loops FIRST (`collapseCanonical`) so N instances of the SAME superseded-goal
+ * chain count as ONE toward `×N`, while genuinely distinct loops still count separately.
  */
 export function renderStatusline(units) {
-  const active = units.filter((u) => !u.paused);
-  const paused = units.filter((u) => u.paused);
+  const collapsed = collapseCanonical(units);
+  const active = collapsed.filter((u) => !u.paused);
+  const paused = collapsed.filter((u) => u.paused);
   if (active.length === 0 && paused.length === 0) return '';
   let out;
   if (active.length === 1) out = `⟳ loop ${active[0].slug}${metSuffix(active[0])}`;

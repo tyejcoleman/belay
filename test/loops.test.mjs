@@ -300,6 +300,123 @@ test('loop create: --autonomy L2 lands on the loops.json entry; omitted → no a
   assert.equal(Object.prototype.hasOwnProperty.call(entry, 'autonomy'), false); // field OMITTED, not defaulted to 'L0'
 });
 
+// ── canonical loops: sliding window, explicit key/supersedes on the loops.json entry (ADR-31) ──
+
+test('loop create: --canonical <key> and --supersedes <ref> land on the loops.json entry; omitted → neither key at all', () => {
+  const h = homes();
+  writeClaudeJson(h);
+  const withBoth = JSON.parse(run(h, ['loop', 'create', '--objective', 'ship it', '--criteria', CRITERIA, '--session-id', 's1', '--canonical', 'my-migration', '--supersedes', 'old-loop']).stdout);
+  assert.equal(withBoth.ok, true, JSON.stringify(withBoth));
+  const e = readLoopsFile(h).loops[withBoth.goal.id];
+  assert.equal(e.canonical, 'my-migration');
+  assert.equal(e.supersedes, 'old-loop');
+  assert.equal(withBoth.steps.find((s) => s.step === 'arm').canonical, 'my-migration');
+  assert.equal(withBoth.steps.find((s) => s.step === 'arm').supersedes, 'old-loop');
+
+  const h2 = homes();
+  writeClaudeJson(h2);
+  const neither = JSON.parse(run(h2, ['loop', 'create', '--objective', 'ship it too', '--criteria', CRITERIA, '--session-id', 's1']).stdout);
+  assert.equal(neither.ok, true, JSON.stringify(neither));
+  const e2 = readLoopsFile(h2).loops[neither.goal.id];
+  assert.equal(Object.prototype.hasOwnProperty.call(e2, 'canonical'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(e2, 'supersedes'), false);
+});
+
+test('loop create: empty-string --canonical / --supersedes is refused pre-spawn (never silently coerced)', () => {
+  const h = homes();
+  writeClaudeJson(h);
+  // an explicit empty-string arg (the bare flag with no value becomes boolean `true` in
+  // bin/belay.mjs's tiny parser, which the loop-create dispatch already treats as
+  // "not passed" — the loopCreate-level empty-string refusal is exercised directly)
+  const out = JSON.parse(run(h, ['loop', 'create', '--objective', 'x', '--criteria', CRITERIA, '--session-id', 's1', '--canonical', '']).stdout);
+  assert.equal(out.ok, false);
+  assert.equal(out.step, 'canonical');
+  assert.equal(existsSync(join(h.keyoku, 'goals.json')), false); // refused BEFORE any spawn
+
+  const h2 = homes();
+  writeClaudeJson(h2);
+  const out2 = JSON.parse(run(h2, ['loop', 'create', '--objective', 'x', '--criteria', CRITERIA, '--session-id', 's1', '--supersedes', '']).stdout);
+  assert.equal(out2.ok, false);
+  assert.equal(out2.step, 'supersedes');
+});
+
+// ── canonicalGroups: the pure grouping helper backing statusline collapsing (ADR-31) ────
+
+test('canonicalGroups: explicit `canonical` key groups two otherwise-unrelated slugs', async () => {
+  const { canonicalGroups } = await import('../src/loops.mjs');
+  const units = [
+    { goalId: 'g1', slug: 'foo', canonical: 'shared', armedAt: 1, paused: false },
+    { goalId: 'g2', slug: 'bar', canonical: 'shared', armedAt: 2, paused: false },
+  ];
+  const groups = canonicalGroups(units);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].key, 'shared');
+  assert.deepEqual(groups[0].members.map((m) => m.goalId).sort(), ['g1', 'g2']);
+});
+
+test('canonicalGroups: -vN / -vN.M slug-stem fallback groups automatically with NO explicit field', async () => {
+  const { canonicalGroups } = await import('../src/loops.mjs');
+  const units = [
+    { goalId: 'g1', slug: 'openkakushin-recomp', armedAt: 1, paused: false },
+    { goalId: 'g2', slug: 'openkakushin-recomp-v2', armedAt: 2, paused: false },
+    { goalId: 'g3', slug: 'openkakushin-recomp-v2.1', armedAt: 3, paused: false },
+  ];
+  const groups = canonicalGroups(units);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].key, 'openkakushin-recomp');
+  assert.deepEqual(groups[0].members.map((m) => m.goalId).sort(), ['g1', 'g2', 'g3']);
+});
+
+test('canonicalGroups: `supersedes` a ref present in the same set inherits that unit\'s resolved key (chain-safe, cycle-safe)', async () => {
+  const { canonicalGroups } = await import('../src/loops.mjs');
+  // 'baz' supersedes 'bar' (slug ref) which supersedes 'foo' (goalId ref) — a 2-hop chain
+  // with mixed slug/goalId refs must still collapse to ONE group.
+  const units = [
+    { goalId: 'g_foo', slug: 'foo', armedAt: 1, paused: false },
+    { goalId: 'g_bar', slug: 'bar', supersedes: 'g_foo', armedAt: 2, paused: false },
+    { goalId: 'g_baz', slug: 'baz', supersedes: 'bar', armedAt: 3, paused: false },
+  ];
+  const groups = canonicalGroups(units);
+  assert.equal(groups.length, 1);
+  assert.deepEqual(groups[0].members.map((m) => m.goalId).sort(), ['g_bar', 'g_baz', 'g_foo']);
+
+  // a cycle (A supersedes B, B supersedes A) must never hang — degrades to each's own stem
+  const cyclic = [
+    { goalId: 'a', slug: 'alpha', supersedes: 'b', armedAt: 1, paused: false },
+    { goalId: 'b', slug: 'beta', supersedes: 'a', armedAt: 2, paused: false },
+  ];
+  const cGroups = canonicalGroups(cyclic);
+  assert.equal(cGroups.length, 2); // no shared slug stem → distinct singleton groups, no hang
+});
+
+test('canonicalGroups: distinct loops (no shared key, no shared stem) stay in SEPARATE groups', async () => {
+  const { canonicalGroups } = await import('../src/loops.mjs');
+  const units = [
+    { goalId: 'g1', slug: 'foo-project', armedAt: 1, paused: false },
+    { goalId: 'g2', slug: 'bar-project', armedAt: 2, paused: false },
+  ];
+  const groups = canonicalGroups(units);
+  assert.equal(groups.length, 2);
+});
+
+test('canonicalGroups: never throws on malformed input', async () => {
+  const { canonicalGroups } = await import('../src/loops.mjs');
+  assert.deepEqual(canonicalGroups(null), []);
+  assert.deepEqual(canonicalGroups(undefined), []);
+  assert.deepEqual(canonicalGroups('not an array'), []);
+  assert.deepEqual(canonicalGroups([null, 42, { slug: 'no-goal-id' }, { goalId: 'ok', slug: 's' }]), [{ key: 's', members: [{ goalId: 'ok', slug: 's' }] }]);
+});
+
+test('stemSlug: strips a trailing -vN / -vN.M suffix; a plain slug is its own stem; never throws', async () => {
+  const { stemSlug } = await import('../src/loops.mjs');
+  assert.equal(stemSlug('foo-recomp-v2'), 'foo-recomp');
+  assert.equal(stemSlug('foo-recomp-v2.1'), 'foo-recomp');
+  assert.equal(stemSlug('foo-recomp'), 'foo-recomp');
+  assert.equal(stemSlug(''), '');
+  assert.equal(stemSlug(null), '');
+  assert.equal(stemSlug(undefined), '');
+});
+
 test('loop create: an invalid --autonomy value is refused pre-spawn, keyoku and belay both untouched', () => {
   const h = homes();
   writeClaudeJson(h);

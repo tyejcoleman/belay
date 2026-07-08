@@ -6,6 +6,7 @@ import { readOwnState, resolveEntry } from './state.mjs';
 import { decideStop } from './stop.mjs';
 import { readLoops } from './loops.mjs';
 import { pendingSummary } from './pending.mjs';
+import { computeMutations, mutationCount } from './mutations.mjs';
 
 /** Open-proposal count straight from proposals.json (ADR-9 posture: a count, never copies;
  *  absent/malformed → 0). `belay propose` / belay_propose carry the full evidence. */
@@ -31,12 +32,29 @@ export function status() {
   const budget = readBudget(payload.session_id);
 
   console.log(`belay status (keyoku: ${k.home})`);
+  // ADR-32: a REAL session id for goal-mutation tracking — `payload.session_id` above
+  // defaults to the synthetic 'status-probe' when there's no sessionId-pinned focus, and
+  // fabricating a mutation snapshot under that placeholder key would mix unrelated callers'
+  // history (no fabrication, mirrors the counters/verdict `attribution` posture below). Falls
+  // back to $CLAUDE_CODE_SESSION_ID (same auto-detect as `belay await`/B4) so an interactive
+  // `belay status` run from inside a live Claude Code session still gets a mutations line.
+  const mutSessionId = payload.session_id !== 'status-probe' ? payload.session_id : typeof process.env.CLAUDE_CODE_SESSION_ID === 'string' && process.env.CLAUDE_CODE_SESSION_ID ? process.env.CLAUDE_CODE_SESSION_ID : null;
   const proposalsLine = () => {
     const n = openProposalCount();
     console.log(`  proposals: ${n} open${n ? ' — `belay propose` for evidence + ready-to-arm args (never auto-armed)' : ''}`);
     // ADR-16: deferred-action queue (presentation metadata only — no decision reads it).
     const pend = pendingSummary();
     console.log(`  pending: ${pend.count} deferred${pend.count ? ` [${pend.classes.join(', ')}] — run \`belay pending\` to review` : ''}`);
+    // ADR-32: goal-mutation one-liner — reporting only, never a decision input. Best-effort
+    // (any failure is swallowed) so a mutations-layer bug can never break `belay status`.
+    if (mutSessionId) {
+      try {
+        const n2 = mutationCount(computeMutations(mutSessionId));
+        console.log(`  mutations: ${n2} changed since last check${n2 ? ' — run `belay mutations` for detail' : ''}`);
+      } catch {
+        /* best-effort — never blocks status output */
+      }
+    }
   };
   if (!k.present) {
     console.log('  keyoku home not found — belay idles');

@@ -7,7 +7,10 @@ import { keyokuSession } from './keyoku-client.mjs';
 // Loop lifecycle state: ~/.belay/loops.json (docs/DESIGN.md §3.1). Owner: agent B (round 1).
 //   { "loops": { "<goalId>": { "armed": true, "paused": false, "armed_at": <epoch>,
 //       "armed_by": "model"|"user"|"proposal:<id>", "session_id": "...", "cwd": "...",
-//       "note": "...", "paused_at": <epoch|null>, "autonomy"?: "L0"|"L1"|"L2" } } }
+//       "note": "...", "paused_at": <epoch|null>, "autonomy"?: "L0"|"L1"|"L2",
+//       "canonical"?: "<key>", "supersedes"?: "<goalIdOrSlug>" } } }
+// `canonical`/`supersedes` (both OPTIONAL, OMITTED unless explicitly passed) are DISPLAY-only
+// grouping hints — see `canonicalGroups` below — never consulted by any block/allow decision.
 // Single source of truth stays keyoku (goals.json + focus.json): belay stores ONLY what
 // keyoku has no concept of — armed-by provenance, pause, continuation counters, and (B6/
 // ADR-28) the loop's declared autonomy level. No goal data is copied beyond the goalId
@@ -147,6 +150,80 @@ export function findContradictions(criteria) {
   return out;
 }
 
+// ── Canonical loop grouping (sliding window: a superseded loop chain renders as ONE) ────
+// A user-declared v2 of e.g. "openkakushin-recomp" superseding v1 is still logically ONE
+// loop. belay never deletes loop history — every armed instance stays in loops.json (the
+// sliding window) — but a DISPLAY surface (the statusline; belay_loop_list/belay status if
+// they ever collapse rather than enumerate) should render one canonical group as ONE entry,
+// not `×2`. Canonical key resolution, in priority order (explicit always wins over inferred):
+//   1. an explicit `canonical` key stamped on the loop entry (`--canonical <key>` /
+//      belay_loop_create's `canonical` arg) — a direct, human-chosen group id.
+//   2. an explicit `supersedes <goalIdOrSlug>` reference (`--supersedes`) that resolves to
+//      ANOTHER loop in the SAME candidate set — this loop inherits THAT loop's own resolved
+//      canonical key (chain-safe: a supersedes chain of any length collapses to one group; a
+//      cycle or self-reference is broken by a visited-set and falls through to rule 3).
+//   3. the `-vN` / `-vN.M` STEM of this loop's own slug (`foo-recomp-v2` → `foo-recomp`) —
+//      the zero-config fallback, so an ordinary version-bumped slug groups automatically with
+//      no explicit wiring at all.
+// A loop with neither an explicit key/reference nor a version-suffixed slug is its own
+// singleton group (its stem IS its full slug) — distinct loops never accidentally merge.
+
+const VERSION_STEM = /-v\d+(?:\.\d+)?$/i;
+
+/** Strip a trailing `-v<N>` / `-v<N>.<M>` version suffix from a slug to derive its canonical
+ *  STEM (`'foo-recomp-v2'` → `'foo-recomp'`, `'foo-recomp-v2.1'` → `'foo-recomp'`). A slug
+ *  with no such suffix is already its own stem. Pure string op — never throws; a non-string
+ *  input degrades to `''` (this only ever feeds a DISPLAY grouping, never a decision). */
+export function stemSlug(slug) {
+  if (typeof slug !== 'string' || !slug) return '';
+  return slug.replace(VERSION_STEM, '') || slug;
+}
+
+/** Resolve ONE unit's canonical key against the full candidate set (priority order above).
+ *  `seen` (a Set of goalIds) breaks a `supersedes` cycle/self-reference by marking "already
+ *  being resolved" BEFORE following the edge, so a loop back to an in-progress node falls
+ *  through to the stem fallback instead of recursing forever. Never throws. */
+function resolveCanonicalKey(unit, byRef, seen) {
+  if (!unit || typeof unit !== 'object') return '';
+  if (typeof unit.canonical === 'string' && unit.canonical) return unit.canonical;
+  if (typeof unit.supersedes === 'string' && unit.supersedes && !seen.has(unit.goalId)) {
+    const target = byRef.get(unit.supersedes);
+    if (target && target.goalId !== unit.goalId) {
+      seen.add(unit.goalId);
+      return resolveCanonicalKey(target, byRef, seen);
+    }
+  }
+  return stemSlug(unit.slug) || (typeof unit.goalId === 'string' ? unit.goalId : '');
+}
+
+/**
+ * Group a flat list of loop-unit descriptors into CANONICAL groups (see priority order
+ * above). Pure, exported, independently testable — no I/O. Never throws: a malformed
+ * `units` input (or malformed members within it) degrades to `[]` / a filtered set rather
+ * than crashing a display surface.
+ *
+ * @param {Array<{goalId:string, slug:string, canonical?:string, supersedes?:string,
+ *   paused?:boolean, armedAt?:number}>} units — the exact shape `statusline.mjs`'s
+ *   `ownedLoopsForStatusline` already builds (one entry per armed loop this session owns).
+ * @returns {Array<{ key: string, members: object[] }>}
+ */
+export function canonicalGroups(units) {
+  if (!Array.isArray(units)) return [];
+  const clean = units.filter((u) => u && typeof u === 'object' && typeof u.goalId === 'string' && u.goalId);
+  const byRef = new Map();
+  for (const u of clean) {
+    byRef.set(u.goalId, u);
+    if (typeof u.slug === 'string' && u.slug && !byRef.has(u.slug)) byRef.set(u.slug, u);
+  }
+  const groups = new Map();
+  for (const u of clean) {
+    const key = resolveCanonicalKey(u, byRef, new Set()) || u.goalId;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(u);
+  }
+  return Array.from(groups.entries()).map(([key, members]) => ({ key, members }));
+}
+
 export async function loopCreate(args = {}) {
   const steps = [];
   const fail = (step, error) => ({ ok: false, step, error, steps });
@@ -196,6 +273,24 @@ export async function loopCreate(args = {}) {
     return fail('autonomy_level', `autonomy must be one of 'L0'|'L1'|'L2' (got '${sanitizeSlug(String(args.autonomy), 24)}') — omit it to keep today's conservative default (everything outward is staged for human review)`);
   }
   const autonomyLevel = args.autonomy;
+
+  // 0c — canonical loop identity (display grouping only — NEVER a decision input): an
+  // explicit `--canonical <key>` and/or `--supersedes <goalIdOrSlug>` may be stamped on the
+  // loops.json entry so a superseded goal-chain (e.g. `foo-recomp` → `foo-recomp-v2`) renders
+  // as ONE canonical loop on the statusline instead of `×2` (`loops.mjs canonicalGroups`).
+  // Both optional and REFUSED-if-the-wrong-type (never silently coerced, mirrors `scope`/
+  // `autonomy`); omitted entirely → no key written on the entry at all — byte-identical to
+  // every loop created before this change. A `-vN` slug suffix already groups automatically
+  // with NEITHER flag passed (the stem fallback), so these are only needed for a chain that
+  // doesn't follow that naming convention.
+  if (args.canonical !== undefined && (typeof args.canonical !== 'string' || !args.canonical)) {
+    return fail('canonical', 'canonical must be a non-empty string key — omit it entirely to use the automatic -vN slug-stem grouping instead');
+  }
+  const canonicalKey = args.canonical !== undefined ? sanitizeSlug(args.canonical, 64) : undefined;
+  if (args.supersedes !== undefined && (typeof args.supersedes !== 'string' || !args.supersedes)) {
+    return fail('supersedes', 'supersedes must be a non-empty string (the goal slug or id this loop replaces)');
+  }
+  const supersedes = args.supersedes !== undefined ? sanitizeSlug(args.supersedes, 64) : undefined;
 
   // 1a/2 — everything refusable is refused BEFORE any spawn (a refusal must leave
   // keyoku byte-identical, and never costs a child).
@@ -320,6 +415,9 @@ export async function loopCreate(args = {}) {
       // B6/ADR-28: field OMITTED entirely when not passed — a loop created without
       // `autonomy` has NO key here, exactly like every loop created before this change.
       ...(autonomyLevel !== undefined ? { autonomy: autonomyLevel } : {}),
+      // Canonical loop identity (display grouping only): OMITTED entirely when not passed.
+      ...(canonicalKey !== undefined ? { canonical: canonicalKey } : {}),
+      ...(supersedes !== undefined ? { supersedes } : {}),
     };
     writeLoopsState(state.loops);
   } catch (e) {
@@ -391,6 +489,8 @@ export async function loopCreate(args = {}) {
     ...(countersReset ? {} : { counters_reset: false, degraded: 'state.json write failed — continuation counters were NOT reset; the loop is still live' }),
     ...(proposalId ? { proposal_id: proposalId, proposal_marked: proposalMarked } : {}),
     ...(autonomyLevel !== undefined ? { autonomy: autonomyLevel } : {}),
+    ...(canonicalKey !== undefined ? { canonical: canonicalKey } : {}),
+    ...(supersedes !== undefined ? { supersedes } : {}),
   });
 
   // 5 — report: the same composition belay_status returns (best-effort — a compose

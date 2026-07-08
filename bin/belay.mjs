@@ -78,6 +78,8 @@ switch (cmd) {
           cwd: typeof f.cwd === 'string' ? f.cwd : process.cwd(),
           proposal_id: typeof f.proposal_id === 'string' ? f.proposal_id : undefined,
           autonomy: typeof f.autonomy === 'string' ? f.autonomy : undefined,
+          canonical: typeof f.canonical === 'string' ? f.canonical : undefined,
+          supersedes: typeof f.supersedes === 'string' ? f.supersedes : undefined,
         })
       );
     } else if (sub === 'list') {
@@ -167,6 +169,13 @@ switch (cmd) {
   case 'selftest':
     (await import('../src/selftest.mjs')).selftestCommand();
     break;
+  case 'mutations': {
+    // Goal-mutation tracking: "always check for mutations" — compares THIS session's
+    // owned keyoku goal states against the last-persisted snapshot and reports the diff.
+    // Read-only on keyoku; writes only belay's own ~/.belay/goal-snap-<session>.json.
+    (await import('../src/mutations.mjs')).mutationsCommand(parseFlags(argv));
+    break;
+  }
   case 'statusline': {
     // A Claude Code statusLine command (docs/DECISIONS.md ADR-30): runs on every UI
     // refresh, so this must never crash and never hang — belay's own choke-point discipline
@@ -199,7 +208,7 @@ usage:
   belay loop create [--goal <slug|id>] [--objective <text> --criteria <json>]
                     [--constraints <json>] [--max-iterations <n>] [--confirm-autonomous]
                     [--session-id <id> | --scope global] [--cwd <dir>] [--proposal-id <id>]
-                    [--autonomy L0|L1|L2]
+                    [--autonomy L0|L1|L2] [--canonical <key>] [--supersedes <goalIdOrSlug>]
                                                    create-and-arm an autonomous convergence loop (writes via keyoku's own process;
                                                    session-scoped by default — --session-id required unless --scope global,
                                                    or auto-detected from $CLAUDE_CODE_SESSION_ID when omitted)
@@ -209,6 +218,10 @@ usage:
                                                    branch; L2 additionally permits pushing to main. Force pushes, npm
                                                    publish/release, gh release, external sends, and spend are ALWAYS staged,
                                                    at every level (docs/DECISIONS.md ADR-28)
+                                                   --canonical/--supersedes mark this loop as part of a superseded goal-
+                                                   chain (e.g. a "v2" replacing "v1") so 'belay statusline' renders the
+                                                   chain as ONE entry instead of ×2 — a plain "-vN" slug suffix already
+                                                   groups automatically with neither flag passed (ADR-31)
   belay loop list                                  loop-relevant goals × arm/pause state × counters
   belay loop pause <goal> [--note <text>]          pause the Stop-hook hold (the fall-arrest gate stays active)
   belay loop resume <goal>                         resume a paused loop (re-demands fresh goal_assess)
@@ -218,6 +231,12 @@ usage:
   belay await <on|off> [--session-id <id>]         mark THIS session as awaiting background work (Stop hook then ALLOWS the
                                                    stop so the loop advances on the harness's worker-completion event, not a
                                                    forced spin); session-scoped, allow-only — never forces a continuation
+  belay mutations [--session-id <id>] [--json]     ALWAYS CHECK FOR MUTATIONS (ADR-32): diff THIS session's owned keyoku
+                                                   goal states (status/convergedAt/criteria fingerprint) against the last
+                                                   snapshot belay took — newly-converged, newly-abandoned, status flips,
+                                                   criteria added/removed, new/removed owned goals. Read-only on keyoku;
+                                                   updates belay's own snapshot on every read. Reporting only — never
+                                                   loosens the PreToolUse gate on goal-abandon/pause (see ADR-32)
   belay propose [--dismiss <id>]                   scan for loop-worthy signals; proposals are advisory, never auto-armed
   belay pending [--clear | --remove <id>]          review actions deferred by gate_mode 'defer' (denied + queued for batched approval)
   belay hook <stop|pre-tool-use|session-start>     (hook commands — wired by install)

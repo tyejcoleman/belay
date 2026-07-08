@@ -88,6 +88,16 @@ export const TOOLS = [
           description:
             "declares how far the PreToolUse fall-arrest gate may go WITHOUT staging an outward action for batched human review (B6/ADR-28). Omit for today's conservative default: EVERY outward action (git push, gh writes, publishes, etc.) is staged, unchanged. 'L1': a plain, non-force git push to a branch OTHER than main/master is permitted; a gh pr create/merge/edit/delete is permitted. 'L2': additionally permits pushing to main/master. A FIXED always-gated set is NEVER permitted at any level — force pushes (--force/-f/--force-with-lease), npm publish, gh release, repo-destructive gh/repo writes, external sends (email/Slack/social), and anything spending money — these stay staged regardless of this setting.",
         },
+        canonical: {
+          type: 'string',
+          description:
+            "declares this loop is part of a CANONICAL goal-chain identified by <key> (ADR-31) — e.g. two goals both created with canonical:'my-migration' render as ONE entry on the statusline instead of ×2, even though both stay in loops.json (nothing is deleted). Omit to use the automatic '-vN' slug-stem grouping instead (e.g. 'foo-recomp' and 'foo-recomp-v2' already group with no flag at all).",
+        },
+        supersedes: {
+          type: 'string',
+          description:
+            "declares this loop REPLACES an earlier one (its goal slug or id) — the new loop is grouped into the SAME canonical display group as the one it supersedes (ADR-31), which is useful when the replacement's slug doesn't follow the automatic '-vN' naming convention. The superseded loop's own history is never deleted.",
+        },
       },
       additionalProperties: false,
     },

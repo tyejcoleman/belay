@@ -197,6 +197,16 @@ convergence, focus scope). Belay stores only what keyoku has no concept of, in
   `main`/`master`. A fixed set is **never** permitted at any level — force pushes,
   `npm publish`, `gh release`/`repo`/`api` writes, external sends, and anything that
   spends money always stay staged.
+- **Canonical loops — a sliding window that shows as one** (`canonical`/`supersedes`,
+  ADR-31) — a superseded goal-chain (e.g. `openkakushin-recomp` → `openkakushin-recomp-v2`)
+  is logically ONE loop. Every armed instance stays in `loops.json` (nothing is deleted —
+  the sliding window), but `belay statusline` collapses a canonical group to ONE entry
+  (its NEWEST active member) instead of `⟳ loop ×2`. Grouping is automatic for an ordinary
+  `-vN`/`-vN.M` slug suffix (no flags needed); `--canonical <key>` and/or `--supersedes
+  <goalIdOrSlug>` on `belay loop create` cover a chain that doesn't follow that naming
+  convention. **Display only** — grouping never feeds the Stop hold, the PreToolUse gate,
+  or the portfolio steering order (ADR-25); it only changes how many glyphs the
+  statusline renders.
 
 ### Proposals — self-proposed, never self-armed (ADR-11)
 
@@ -217,6 +227,22 @@ Proposals are **never** auto-armed: arming happens only through an explicit
 "proposal:<id>"` is recorded — auditable via `belay_loop_list`). Dismissals are durable:
 ids are content hashes, so a persisting signal keeps its id and a dismissed one stays
 dismissed until the signal itself changes.
+
+### Goal-mutation tracking — always check what changed (ADR-32)
+
+`belay mutations [--session-id <id>] [--json]` persists a small snapshot of THIS
+session's OWNED keyoku goal states (`~/.belay/goal-snap-<session>.json` — id, slug,
+status, `convergedAt`, a cheap criteria fingerprint) and, on every subsequent check,
+diffs the live state against it: **newly-converged, newly-abandoned, status flips,
+criteria added/removed, new/removed owned goals.** The first-ever check for a session
+just establishes the baseline (nothing is reported as "new" yet); `belay status` also
+folds a one-line `mutations: N changed since last check` summary in when a real session
+id is known. Read-only on keyoku — the only write is belay's own snapshot file.
+
+**This is detection/reporting only.** Nothing here feeds the PreToolUse gate or the Stop
+hook: it never loosens the arrest on goal-abandon/pause (ADR-19's `loop control` class is
+untouched), and it cannot cause a goal to converge or be abandoned — only observe it.
+Retiring a loop stays the human-directed `belay loop disarm` path.
 
 ## MCP tools (`belay mcp`)
 
@@ -383,7 +409,7 @@ and `belay doctor` reports the warning. Bad config never crashes a hook.
 |---|---|---|
 | Keyoku (`$KEYOKU_HOME` \|\| `~/.keyoku`) | `paused`, `focus.json`, `goals.json`, `observations/<goalId>.jsonl`, `ripe.json` | read-only from files, pinned to keyoku >=2.7 <3, layout self-checked by `belay doctor`. Never runs probes; never rewrites goals/focus. Writes go ONLY through keyoku's own registered server process, spawned per explicit loop create/disarm call (ADR-10) — never from hooks. |
 | tokenroom (`$TOKENROOM_DIR` \|\| `~/.tokenroom`) | `state.json`, `accounts/<key>/state.json`, `sessions.json`, `profiles.json`, `resume.json` | read-only. >30min old → budget UNKNOWN. |
-| belay (`$BELAY_DIR` \|\| `~/.belay`) | `state.json` (continuation counters), `config.json`, `loops.json` (arm/pause provenance), `proposals.json`, `pending.json` (defer-mode queue — presentation metadata, never consulted by a decision) | its own state only; dirs 0700, files 0600, atomic writes. No goal data is copied beyond the goalId key. |
+| belay (`$BELAY_DIR` \|\| `~/.belay`) | `state.json` (continuation counters), `config.json`, `loops.json` (arm/pause provenance), `proposals.json`, `pending.json` (defer-mode queue — presentation metadata, never consulted by a decision), `goal-snap-<session>.json` (ADR-32 — a session's owned-goal mutation-tracking baseline; reporting only, never consulted by a decision) | its own state only; dirs 0700, files 0600, atomic writes. No goal data is copied beyond the goalId key. |
 
 ## CLI
 
@@ -399,16 +425,21 @@ belay mcp         # stdio MCP server (belay_status, belay_loop_*, belay_propose)
 belay loop create [--goal <slug|id>] [--objective <text> --criteria <json>]
                   [--constraints <json>] [--max-iterations <n>] [--confirm-autonomous]
                   [--session-id <id> | --scope global] [--cwd <dir>] [--proposal-id <id>]
-                  [--autonomy L0|L1|L2]
+                  [--autonomy L0|L1|L2] [--canonical <key>] [--supersedes <goalIdOrSlug>]
                   # session-scoped by default (ADR-14): --session-id required unless --scope global
                   # --autonomy (ADR-28, omitted = today's stage-everything default): L1 permits a
                   # plain git push to a non-default branch + gh pr writes; L2 also permits main.
                   # Force pushes / npm publish / gh release / external sends always stay staged.
+                  # --canonical/--supersedes (ADR-31) group a superseded goal-chain into ONE
+                  # statusline entry; a "-vN" slug suffix already groups with neither flag.
 belay loop list                            loop-relevant goals × arm/pause state × counters
 belay loop pause <goal> [--note <text>]    pause the Stop hold (the fall-arrest gate stays active)
 belay loop resume <goal>                   resume (re-demands a fresh goal_assess)
 belay loop disarm <goal>                   unfocus via keyoku + clear arm state (captures a retro)
 belay loop retro [<goal> [--no-push] | --limit n]   record a loop's retro (thrash/convergence telemetry); with a goal, file it into keyoku's knowledge store
+belay mutations [--session-id <id>] [--json]   always check for mutations (ADR-32): diff a session's owned
+                                            goal states since the last check — converged/abandoned/status
+                                            flips/criteria changes/owned-set changes. Read-only, reporting only
 belay propose [--dismiss <id>]             scan for loop-worthy signals; advisory, never auto-armed
 belay pending [--clear | --remove <id>]    review actions deferred by gate_mode 'defer' (denied + queued for batched approval)
 belay hook <stop|pre-tool-use|session-start>   # wired by install
